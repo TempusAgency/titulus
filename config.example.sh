@@ -14,14 +14,14 @@
 # ============================================================================
 # Кожен фоновий виклик `claude -p` — це РЕАЛЬНІ токени (вхід+вихід) на твій рахунок,
 # і він множиться на кількість одночасних сесій. Дефолти нижче зроблені МАКСИМАЛЬНО
-# дешевими: НАЗВА і ЦІЛЬ генеруються ОДИН раз на старті сесії й заморожуються; ЗАДАЧА
-# і ПОПЕРЕДНЯ ВИМКНЕНІ. Коли НАЗВА+ЦІЛЬ заморожені й ЗАДАЧА/ПОПЕРЕДНЯ вимкнені — сесія
+# дешевими: НАЗВА (роль) генерується ОДИН раз на старті сесії й заморожується; ЗАДАЧА
+# і ПОПЕРЕДНЯ ВИМКНЕНІ. Коли НАЗВА заморожена й ЗАДАЧА/ПОПЕРЕДНЯ вимкнені — сесія
 # більше НЕ робить жодного фонового виклику (0 токенів). Усе, що ти вмикаєш нижче з
 # поміткою «⚠️ витрачає токени», повертає періодичні виклики.
 
 # --- Master kill switch -----------------------------------------------------
-# Set to any non-empty value to STOP all background generation (no model calls,
-# no goal-keeper). The card keeps whatever it last had. Cost + privacy opt-out:
+# Set to any non-empty value to STOP all background generation (no model calls).
+# The card keeps whatever it last had. Cost + privacy opt-out:
 # when set, no chat content leaves your machine via the background summarizer.
 # WCT_DISABLE=1
 
@@ -38,16 +38,8 @@
 # Default: 0 (off).
 # WCT_PREVIOUS_FIELD=1
 
-# --- ЦІЛЬ (GOAL) refresh policy --------------------------------------------
-# once     = згенерувати ЦІЛЬ ОДИН раз на старті, далі заморозити (НАЙДЕШЕВШЕ, дефолт)
-# periodic = ⚠️ ВИТРАЧАЄ ТОКЕНИ: перегенеровувати ЦІЛЬ кожні WCT_GOAL_REFRESH_SECONDS
-# off      = взагалі не генерувати ЦІЛЬ (перший рядок картки візьме НАЗВУ)
-# WCT_GOAL_REFRESH=once
-# WCT_GOAL_REFRESH_SECONDS=3600     # лише для periodic; default 3600 (1 год)
-
 # --- Input character caps (чим менше — тим менше токенів на виклик) ---------
-# Скільки символів чату слати моделі. ЦІЛЬ береться з ПОЧАТКУ чату (там намір).
-# WCT_GOAL_INPUT_CHARS=12000        # було 40000 (увесь чат) — тепер раз і дешевше
+# Скільки символів чату слати моделі.
 # WCT_NAME_INPUT_CHARS=4000         # перші повідомлення → НАЗВА
 # WCT_RECENT_INPUT_CHARS=6000       # останні повідомлення → ЗАДАЧА/ПОПЕРЕДНЯ (лише якщо ввімкнено)
 
@@ -59,13 +51,13 @@
 
 # --- Model used by the background summarizer -------------------------------
 # Cheaper/faster vs richer. Default: claude-sonnet-4-6.
-# Економний пресет: Haiku помітно дешевший за Sonnet на тій самій якості NAME/GOAL.
+# Економний пресет: Haiku помітно дешевший за Sonnet на тій самій якості NAME.
 # WCT_MODEL="claude-sonnet-4-6"
 # WCT_MODEL="claude-haiku-4-5"      # ← економний варіант
 
 # --- How often the card may regenerate (seconds) --- ⚠️ нижче = більше токенів ---
-# The Stop hook throttles to this. Стосується лише ЖИВИХ полів (TASK/PREVIOUS) та
-# periodic-цілі; заморожені NAME/GOAL цим не керуються. Default: 600 (10 min).
+# The Stop hook throttles to this. Стосується лише ЖИВИХ полів (TASK/PREVIOUS);
+# заморожена NAME цим не керується. Default: 600 (10 min).
 # WCT_THROTTLE_SECONDS=600
 
 # --- Explicit path to the `claude` binary ----------------------------------

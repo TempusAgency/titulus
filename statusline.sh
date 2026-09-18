@@ -3,7 +3,7 @@
 # background fill) that flows straight from the input line. Top→bottom:
 #   <glyph> <Name>                          session glyph (orange, animated while working) + name (blue bold)
 #   ──────────────────                      zone divider (muted)
-#   ◎ Ціль / ▸ Задача / ◃ Попередня         wrapped, hang-indented
+#   ▸ Задача / ◃ Попередня                  wrapped, hang-indented
 #   ──────────────────
 #   <glyph> <id> · CTX N% · 5h · ↺ eta · 7d   meta chips, wrap at " · "
 #   ◆ model · ↯ effort · ⇄ PR
@@ -77,20 +77,18 @@ effort=""; rl5=""; rl5_reset=""; rl7=""; rl7_reset=""; pr_num=""; pr_state=""; a
 # 1M-context tag if the model id carries it and the display name doesn't already say so
 ctxsize=""; case "$model_id" in *1m*|*1M*) case "$model_disp" in *1M*|*1m*) ;; *) ctxsize=" 1M";; esac;; esac
 
-ai_file="$cache_dir/$session_id.ai"           # 3 lines: goal / task / prev
+ai_file="$cache_dir/$session_id.ai"           # 3 lines: <reserved empty> / task / prev
 name_file="$cache_dir/$session_id.name"       # auto chat name (provisional or frozen)
 heur_file="$cache_dir/$session_id.heur"       # 1 line fallback: first user message
 name_user="$user_dir/$session_id.topic"       # user-stated NAME (wins, permanent)
-goal_user="$user_dir/$session_id.goal"        # user-stated goal  (wins over AI)
 
-name=""; goal=""; task=""; prev=""
-# goal / task / prev — 3 lines read with builtins (no sed forks). The worker writes the file
-# atomically (mv), so reading it directly here is torn-read-safe.
+name=""; task=""; prev=""
+# 3 lines read with builtins (no sed forks). LINE 1 IS A RESERVED, ALWAYS-EMPTY PLACEHOLDER (the
+# former goal): the file format is kept 3-line ON PURPOSE so task/prev keep their positions. The
+# worker writes the file atomically (mv), so reading it directly here is torn-read-safe.
 if [ -s "$ai_file" ]; then
-  { IFS= read -r goal; IFS= read -r task; IFS= read -r prev; } < "$ai_file"
+  { IFS= read -r _unused; IFS= read -r task; IFS= read -r prev; } < "$ai_file"
 fi
-# user-set goal wins and is FROZEN (drives the ◎ Ціль line, NOT the role line).
-[ -s "$goal_user" ] && goal="$(<"$goal_user")"
 
 # coord ROLE (SPEC-card-line1-role): ONLY if a coord inbox file for this session exists in cwd, read
 # its `role:` field. ZERO forks when the file is absent (the common case); one grep when present.
@@ -140,12 +138,11 @@ fi
 
 # strip any control/ANSI bytes before they reach the terminal — bash builtin (UTF-8 safe: control
 # bytes never occur inside multibyte sequences), replaces 4 perl spawns.
-name="${name//[[:cntrl:]]/}"; goal="${goal//[[:cntrl:]]/}"; task="${task//[[:cntrl:]]/}"; prev="${prev//[[:cntrl:]]/}"
+name="${name//[[:cntrl:]]/}"; task="${task//[[:cntrl:]]/}"; prev="${prev//[[:cntrl:]]/}"
 
 # sanity cap (wrapping handles normal lengths; this just stops a runaway paragraph)
 cap=160
 [ "${#name}" -gt "$cap" ] && name="${name:0:cap}…"
-[ "${#goal}" -gt "$cap" ] && goal="${goal:0:cap}…"
 [ "${#task}" -gt "$cap" ] && task="${task:0:cap}…"
 [ "${#prev}" -gt "$cap" ] && prev="${prev:0:cap}…"
 
@@ -196,19 +193,19 @@ if [ "$working" = 1 ]; then
 fi
 
 # ONE perl pass for ALL char-aware (Cyrillic) work: name capitalisation + wrapping + colouring of
-# the name line, the zone divider, and the goal/task/prev/path field blocks (no per-line bash forks).
-# Emits NUL-separated blocks: [0]=name [1]=divider [2]=goal [3]=task [4]=prev [5..]=one path each.
+# the name line, the zone divider, and the task/prev/path field blocks (no per-line bash forks).
+# Emits NUL-separated blocks: [0]=name [1]=divider [2]=EMPTY PLACEHOLDER (kept so the path blocks
+# stay at [5+i] — do NOT renumber) [3]=task [4]=prev [5..]=one path each.
 render_text() {
   W="$W" BARMARG="${WCT_NAME_BAR_MARGIN:-1}" perl -CSA -Mutf8 -MText::Wrap -e '
     my $W=$ENV{W}+0;
     $Text::Wrap::columns=$W+1; $Text::Wrap::huge="wrap"; $Text::Wrap::unexpand=0;
-    my ($glyph,$name,$goal,$task,$prev,@dirs)=@ARGV;
+    my ($glyph,$name,$task,$prev,@dirs)=@ARGV;
     $name =~ s/^(\s*)(\p{L})/$1.uc($2)/e;
     my $E="\033"; my $RESET="${E}[0m"; my $BOLD="${E}[1m"; my $FGDEF="${E}[39m";
-    # Palette (Serg 2026-06-08): blue FILL bar at the top (white name); white dividers + goal;
+    # Palette (Serg 2026-06-08): blue FILL bar at the top (white name); white dividers;
     # grey task; greyer previous; folders white (in bash); a calm blue-grey for the path.
     my $WHITE ="${E}[38;2;245;246;250m";  # name text on the bar
-    my $CIL   ="${E}[38;2;212;216;226m";  # goal — white, a touch dimmer
     my $GREY  ="${E}[38;2;158;162;172m";  # task — grey
     my $GREYER="${E}[38;2;110;114;124m";  # previous — greyer
     my $PATH  ="${E}[38;2;124;138;162m";  # path — calm blue-grey
@@ -232,7 +229,7 @@ render_text() {
     }
     my @b = ($nameblock,
              $RULE.("─" x $W).$RESET,                                 # dividers — dim (CC-like)
-             field($CIL,    $goal ne "" ? "◎ Ціль: $goal"     : ""),  # Ціль — white, slightly dimmer
+             field("",""),                                            # [2] RESERVED empty placeholder
              field($GREY,   $task ne "" ? "▸ Задача: $task"    : ""),  # Задача — grey
              field($GREYER, $prev ne "" ? "◃ Попередня: $prev" : "")); # Попередня — greyer
     push @b, field($PATH,"↳ $_") for @dirs;                          # path — calm blue-grey
@@ -241,7 +238,7 @@ render_text() {
 }
 tb=()
 while IFS= read -r -d '' blk; do tb+=("$blk"); done \
-  < <(render_text "$sicon" "$name" "$goal" "$task" "$prev" ${dirs[@]+"${dirs[@]}"})
+  < <(render_text "$sicon" "$name" "$task" "$prev" ${dirs[@]+"${dirs[@]}"})
 
 # meta-bar: chips joined by " · ", wrapping at $W onto fresh rows. Every row carries the same left
 # text-indent as the name bar (WCT_NAME_BAR_MARGIN) — text-only; dividers/the bar are not indented.
@@ -323,10 +320,11 @@ if [ -d "$wf_dir" ] && [ -n "$transcript" ] && [ -f "$transcript" ]; then
   case "$wf_n" in ''|*[!0-9]*) wf_n=0;; esac
 fi
 
-# ============================ NAME + goal/task/prev =======================================
+# ============================ NAME + task/prev ============================================
 printf '%s' "${tb[0]}"                                       # <glyph> <Name> colour bar
 # content sits directly under the name bar — no divider between them (the bar is the separator).
-[ -n "${tb[2]:-}" ] && printf '\n%s' "${tb[2]}"             # ◎ Ціль
+# NOTE: tb[2] is the RESERVED empty placeholder — never printed, never renumbered (the path rows
+# below rely on tb[5+di], so removing the slot would shift them onto the task line).
 [ -n "${tb[3]:-}" ] && printf '\n%s' "${tb[3]}"             # ▸ Задача
 [ -n "${tb[4]:-}" ] && printf '\n%s' "${tb[4]}"             # ◃ Попередня
 printf '\n%s' "${tb[1]}"                                     # divider (content | meta)

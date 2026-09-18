@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # wave-chat-title — post-install wiring.
 #
-# The HOOKS (Stop summarizer + SessionStart goal-keeper) activate automatically when the
+# The HOOKS (Stop summarizer + SessionStart role-keeper) activate automatically when the
 # plugin is enabled. This script wires the ONE piece a plugin cannot self-register: the status
 # line (a single global setting, so it must be opted in), plus it seeds the persistent data dir.
 #
