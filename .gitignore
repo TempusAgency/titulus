@@ -1,0 +1,9 @@
+# Backups made before manual edits (e.g. *.bak-2026-09-16) — git history is the real backup now.
+*.bak-*
+
+# Logs (e.g. worker.log from the background summarizer) and local runtime state.
+*.log
+
+# OS / editor cruft.
+.DS_Store
+*.swp

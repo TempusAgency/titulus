@@ -1,0 +1,7 @@
+# Shell scripts MUST keep LF line endings. On Windows, Claude Code runs the statusline & hooks
+# through Git Bash; a CRLF (\r) in the shebang or any command line makes bash fail with cryptic
+# "\r: command not found" / "bad interpreter" errors. Force LF on checkout everywhere, on every OS.
+*.sh    text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
+*.example.sh text eol=lf

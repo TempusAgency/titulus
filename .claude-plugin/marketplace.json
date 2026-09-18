@@ -1,0 +1,23 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "wave-chat-title",
+  "description": "Live per-chat status card (Topic/Goal/Task/Previous) + goal-keeper for Claude Code.",
+  "owner": {
+    "name": "Tempus.agency",
+    "email": "office@tempus.agency"
+  },
+  "plugins": [
+    {
+      "name": "wave-chat-title",
+      "description": "Auto-summarized status card for each Claude Code session, rendered in the status line. Background Stop-hook summarizer (hardened against prompt injection) + SessionStart goal-keeper. Run install.sh once to wire the status line.",
+      "version": "0.3.0",
+      "author": {
+        "name": "Tempus.agency",
+        "email": "office@tempus.agency"
+      },
+      "source": "./",
+      "category": "productivity",
+      "homepage": "https://github.com/TempusAgency"
+    }
+  ]
+}

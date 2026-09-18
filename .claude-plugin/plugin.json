@@ -1,0 +1,11 @@
+{
+  "name": "wave-chat-title",
+  "version": "0.3.0",
+  "description": "Live status card for each Claude Code chat — auto-summarized Topic / Goal / Task / Previous, plus a goal-keeper that nudges you when a message drifts off-goal. Renders in the status line; updates in the background on each turn.",
+  "author": {
+    "name": "Tempus.agency",
+    "email": "office@tempus.agency"
+  },
+  "homepage": "https://github.com/TempusAgency",
+  "keywords": ["statusline", "status-card", "session-summary", "goal-tracking", "hooks", "wave-terminal"]
+}
