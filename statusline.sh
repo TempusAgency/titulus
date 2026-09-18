@@ -8,7 +8,8 @@
 #   <glyph> <id> · CTX N% · 5h · ↺ eta · 7d   meta chips, wrap at " · "
 #   ◆ model · ↯ effort · ⇄ PR
 #   ──────────────────
-#   ⌂ dir · ⎇ branch  /  ↳ path             per working directory
+#   ⌂ dir · ↱ branch  /  ↳ path             per working directory (↱ = U+21B1, replaces ⎇ — that
+#                                            glyph is missing from the font stack in use)
 # No left/right edges → nothing ever truncates; adapts to any width. Wrap width from $COLUMNS
 # (CC ≥2.1.153) with $TMPDIR/wave-chat-title/.wrapwidth → 38 fallback. AI lines come from Sonnet
 # in the background (topic-update.sh).
@@ -94,7 +95,9 @@ fi
 # its `role:` field. ZERO forks when the file is absent (the common case); one grep when present.
 # Trim + prettify (capitalise an ASCII slug's first letter, ensure a trailing period) — builtins.
 coord_role=""
+coord_present=0
 if [ -n "$cwd" ] && [ -f "$cwd/_coord/inbox/$session_id.md" ]; then
+  coord_present=1
   coord_role="$(grep -m1 '^role:' "$cwd/_coord/inbox/$session_id.md" 2>/dev/null)"
   coord_role="${coord_role#role:}"
   coord_role="${coord_role#"${coord_role%%[![:space:]]*}"}"   # ltrim
@@ -385,7 +388,7 @@ if [ "${#dirs[@]}" -gt 0 ]; then
     printf -v dlink '\033]8;;file://%s\033\\\342\214\202 %s\033]8;;\033\\' "$dd" "$dn"
     seg "${LIGHT}${dlink}${FGDEF}" "⌂ ${dn}"
     dbr="$(git_branch "$dd")"
-    [ -n "$dbr" ] && seg "${LIGHT}⎇ ${dbr}${FGDEF}" "⎇ ${dbr}"
+    [ -n "$dbr" ] && seg "${LIGHT}↱ ${dbr}${FGDEF}" "↱ ${dbr}"
     printf '\n%s' "${tb[$((5 + di))]:-↳ $dd}"                # pre-coloured ↳ path block
     di=$((di + 1))
   done
