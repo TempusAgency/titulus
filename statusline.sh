@@ -1,27 +1,38 @@
 #!/usr/bin/env bash
-# wave-chat-title — Claude Code status line card: a FLAT, full-width layout (no box frame, no
-# background fill) that flows straight from the input line. Top→bottom:
-#   <glyph> <Name>                          session glyph (orange, animated while working) + name (blue bold)
-#   ──────────────────                      zone divider (muted)
-#   ▸ Задача / ◃ Попередня                  wrapped, hang-indented
-#   ──────────────────
-#   <glyph> <id> · CTX N% · 5h · ↺ eta · 7d   meta chips, wrap at " · "
-#   ◆ model · ↯ effort · ⇄ PR
-#   ──────────────────
-#   ⌂ dir · ↱ branch  /  ↳ path             per working directory (↱ = U+21B1, replaces ⎇ — that
-#                                            glyph is missing from the font stack in use)
-# No left/right edges → nothing ever truncates; adapts to any width. Wrap width from $COLUMNS
-# (CC ≥2.1.153) with $TMPDIR/wave-chat-title/.wrapwidth → 38 fallback. AI lines come from Sonnet
-# in the background (topic-update.sh).
+# wave-chat-title — Claude Code status line card: variant B «Сегменти» — a boxed card with
+# segments identity (id+role) -> vitals (CTX/5h/7d/model/effort) -> activity (agents/wf/coord,
+# only when there is something to show) -> place (working directories). Ported from the approved
+# reference renderer `design/render.py` / `design/REFERENCE.md` (do not edit those — they are the
+# spec + contract test). Top→bottom:
+#   ╭─ <glyph> <id> ───────────────────────────────────────────╮   top border: id + animated glyph
+#   │ <role text, wrapped, hang-indented>                      │   identity
+#   ├────────────────────────────────────────────────────────── ┤   separator (double rail if active)
+#   │ ◷ CTX N%  ◴ 5h N%  ↺ eta  ◴ 7d N%  ↺ eta                 │   vitals row 1
+#   │ ◆ model  ↯ effort  [⇄ PR #N state]                       │   vitals row 2
+#   ├──────────────────────────────────────────────────────────┤   (only if agents/wf/coord)
+#   │ ⠹ agents ×N  ⚙ wf ×N  ⇅ coord                            │   activity
+#   ├──────────────────────────────────────────────────────────┤
+#   │ ⌂ dir  ↱ branch  ↳ path  (one row per working dir)        │   place
+#   ╰──────────────────────────────────────────────────────────╯
+# Rails: single ─ = inactive, double ═ = active (2nd signal channel besides colour). "Active" =
+# `.working` marker OR live agents/wf (coord mail shows the segment but never lights it up).
+# Corners: TL/BR use the TempusGlyphs PUA glyphs (font: ~/Library/Fonts/TempusGlyphs-Regular.ttf,
+# U+E87E / U+E881); TR/BL are always the plain ┐ / └. Branch glyph is ↱ (U+21B1), NOT ⎇ — the
+# latter is missing from the font stack in use and renders broken.
 #
-# COST DISCIPLINE (rework 2026-06-07 — after refreshInterval=1 × ~40 sessions pinned the CPU):
-# this script runs on a GLOBAL config, so every fork is multiplied by the count of live sessions.
-# It is kept deliberately cheap: ONE jq pass for all JSON fields, ONE perl pass for all char-aware
-# work (wrapping + capitalisation + colouring of the name/divider/field blocks), git cached ~5s on
-# disk, a single date(NOW) reused everywhere, control-char stripping / basename / .ai read done with
-# bash builtins, per-session id colour and the locale decision cached. Common idle render ≈ 6-9
-# subprocesses (depending on the AI card; was ~80). Before adding any per-render command, remember
-# it costs ×(live sessions).
+# Removed in this port (2026-09-18, variant B rollout): the old flat "▸ Задача / ◃ Попередня"
+# AI-summary lines. The boxed design (render.py Scene / REFERENCE.md) has no slot for them — the
+# role line replaces that orienting function. The background writer (topic-update.sh) still writes
+# its cache file; this script just no longer reads or displays it. Fully recoverable from git
+# history (see `git log -- statusline.sh`) if that turns out to be wrong.
+#
+# COST DISCIPLINE (rework 2026-06-07, reaffirmed 2026-09-18 during the box-layout port): this
+# script runs on a GLOBAL config, so every fork is multiplied by the count of live sessions
+# (~40). ALL char-aware work — role word-wrap, path truncation, box-frame drawing (borders,
+# separators, padding, rails), colouring — happens in the ONE perl pass (`render_text`), exactly
+# as before the port. No python, no extra forks were added for the new layout; see the handback
+# report for the before/after subprocess count. Before adding any per-render command, remember it
+# costs ×(live sessions).
 set -uo pipefail
 
 cache_dir="${TMPDIR:-/tmp}/wave-chat-title"   # ephemeral AI cache (macOS wipes TMPDIR)
@@ -78,24 +89,16 @@ effort=""; rl5=""; rl5_reset=""; rl7=""; rl7_reset=""; pr_num=""; pr_state=""; a
 # 1M-context tag if the model id carries it and the display name doesn't already say so
 ctxsize=""; case "$model_id" in *1m*|*1M*) case "$model_disp" in *1M*|*1m*) ;; *) ctxsize=" 1M";; esac;; esac
 
-ai_file="$cache_dir/$session_id.ai"           # 3 lines: <reserved empty> / task / prev
 name_file="$cache_dir/$session_id.name"       # auto chat name (provisional or frozen)
 heur_file="$cache_dir/$session_id.heur"       # 1 line fallback: first user message
 name_user="$user_dir/$session_id.topic"       # user-stated NAME (wins, permanent)
 
-name=""; task=""; prev=""
-# 3 lines read with builtins (no sed forks). LINE 1 IS A RESERVED, ALWAYS-EMPTY PLACEHOLDER (the
-# former goal): the file format is kept 3-line ON PURPOSE so task/prev keep their positions. The
-# worker writes the file atomically (mv), so reading it directly here is torn-read-safe.
-if [ -s "$ai_file" ]; then
-  { IFS= read -r _unused; IFS= read -r task; IFS= read -r prev; } < "$ai_file"
-fi
-
-# coord ROLE (SPEC-card-line1-role): ONLY if a coord inbox file for this session exists in cwd, read
-# its `role:` field. ZERO forks when the file is absent (the common case); one grep when present.
-# Trim + prettify (capitalise an ASCII slug's first letter, ensure a trailing period) — builtins.
-coord_role=""
+# coord ROLE + coord PRESENCE (SPEC-card-line1-role / activity ⇅ coord): ONLY if a coord inbox
+# file for this session exists in cwd. ZERO forks when the file is absent (the common case); one
+# grep when present. coord_present drives the activity chip; coord_role feeds the name/role
+# precedence chain below — SAME disk read, no extra access for the new indicator.
 coord_present=0
+coord_role=""
 if [ -n "$cwd" ] && [ -f "$cwd/_coord/inbox/$session_id.md" ]; then
   coord_present=1
   coord_role="$(grep -m1 '^role:' "$cwd/_coord/inbox/$session_id.md" 2>/dev/null)"
@@ -112,15 +115,14 @@ if [ -n "$cwd" ] && [ -f "$cwd/_coord/inbox/$session_id.md" ]; then
   if [ -n "$coord_role" ]; then
     case "$coord_role" in [a-z]*)   # capitalise first letter of an ASCII slug (orchestrator → Orchestrator)
       _r="${coord_role#?}"; coord_role="$(printf '%s' "${coord_role%"$_r"}" | tr 'a-z' 'A-Z')$_r";; esac
-    # NO forced punctuation: the line is "Role › function" (function optional) — the role word stands
-    # alone when there's no function; the › + function come from the source string when present.
   fi
 fi
 
-# FIRST LINE = ROLE ("Слово. допис"). Precedence: user-set role → coord role → CC session_name →
-# background auto-role → first-message heuristic. HARD RULE: the AI auto-role and the heuristic
-# NEVER override a KNOWN role (user-set or coord) — that kills the "card describes its own restart /
-# shows (нова сесія)" bug.
+# ROLE ("Слово. допис") = the card's identity segment text. Precedence: user-set role → coord role
+# → CC session_name → background auto-role → first-message heuristic. HARD RULE: the AI auto-role
+# and the heuristic NEVER override a KNOWN role (user-set or coord) — that kills the "card
+# describes its own restart / shows (нова сесія)" bug.
+name=""
 if   [ -s "$name_user" ]; then name="$(<"$name_user")"
 elif [ -n "$coord_role" ]; then name="$coord_role"
 elif [ -n "${session_name:-}" ]; then name="$session_name"
@@ -140,26 +142,26 @@ else
 fi
 
 # strip any control/ANSI bytes before they reach the terminal — bash builtin (UTF-8 safe: control
-# bytes never occur inside multibyte sequences), replaces 4 perl spawns.
-name="${name//[[:cntrl:]]/}"; task="${task//[[:cntrl:]]/}"; prev="${prev//[[:cntrl:]]/}"
+# bytes never occur inside multibyte sequences).
+name="${name//[[:cntrl:]]/}"
 
-# sanity cap (wrapping handles normal lengths; this just stops a runaway paragraph)
+# sanity cap — matches design's truncate_role(160): the perl word-wrap only handles normal
+# lengths; this stops a runaway paragraph before it ever reaches the box.
 cap=160
 [ "${#name}" -gt "$cap" ] && name="${name:0:cap}…"
-[ "${#task}" -gt "$cap" ] && task="${task:0:cap}…"
-[ "${#prev}" -gt "$cap" ] && prev="${prev:0:cap}…"
 
 # wrap width — adaptive, with a fallback chain so it works even where CC can't hand us the width:
 #   1) $COLUMNS — the real terminal width CC exports (≥2.1.153). Best, and updates on resize.
 #   2) tmux pane width — for tmux-based launchers (e.g. Tempus Launcher) where CC runs captured and
-#      does NOT export COLUMNS, so the card would otherwise fall back to a narrow 38. This queries the
-#      LIVE pane, so it re-adapts when the pane/block is resized. Only runs when COLUMNS is absent.
+#      does NOT export COLUMNS, so the card would otherwise fall back to a narrow 38. This queries
+#      the LIVE pane, so it re-adapts when the pane/block is resized. Only runs when COLUMNS absent.
 #   3) manual .wrapwidth override → 4) 38.
-# The flat layout has no right edge, so using the full width is safe (nothing truncates).
+# This is the box's total outer width (border to border) — content_row/top_border/etc pad or
+# truncate every line to exactly this many cells.
 if [ -n "${COLUMNS:-}" ] && [ "$COLUMNS" -gt 0 ] 2>/dev/null; then
-  W=$(( COLUMNS > 1 ? COLUMNS - 1 : COLUMNS ))   # -1: leave the last cell so CC never clips a "…"
+  W=$(( COLUMNS > 1 ? COLUMNS - 1 : COLUMNS ))
 elif [ -n "${TMUX:-}" ] && _pw="$(tmux display-message -p '#{pane_width}' 2>/dev/null)" && [ "${_pw:-0}" -gt 0 ] 2>/dev/null; then
-  W=$(( _pw > 1 ? _pw - 1 : _pw ))               # tmux launcher: live pane width, adaptive on resize
+  W=$(( _pw > 1 ? _pw - 1 : _pw ))
 elif [ -f "$cache_dir/.wrapwidth" ]; then
   W="$(<"$cache_dir/.wrapwidth")"
 else
@@ -167,108 +169,13 @@ else
 fi
 case "$W" in ""|*[!0-9]*) W=38;; esac
 
-# Tempus brand palette (matches tempus-launcher). CLAUDE terracotta = name + session id;
-# LIGHT = folders; meta chips stay subtle (default / dim). No per-session hash colour ("no fantasy").
-CLAUDE=$'\033[38;2;217;119;87m'; FGDEF=$'\033[39m'
-LIGHT=$'\033[38;2;245;246;250m'
-BOLD=$'\033[1m'; DIM=$'\033[2m'; RESET=$'\033[0m'; UNBOLD=$'\033[22m'; AGCOL=$'\033[38;2;158;206;106m'
-WFCOL=$'\033[38;2;125;207;225m'   # workflow chip — cyan, distinct from the green agents chip
-
-# build the clean working-dir list (cwd + every /add-dir'd dir), empties filtered, used for BOTH
-# the text-wrap pass and the render loop so indices line up.
+# build the clean working-dir list (cwd + every /add-dir'd dir), empties filtered, used for the
+# place segment (one row/pair per dir).
 rawdirs=("$cwd")
 for ad in ${added_dirs[@]+"${added_dirs[@]}"}; do rawdirs+=("$ad"); done
 dirs=()
 for d in ${rawdirs[@]+"${rawdirs[@]}"}; do [ -n "$d" ] && dirs+=("$d"); done
 
-# animated session glyph — computed BEFORE the text pass because the name line embeds it.
-# "working" = explicit marker (UserPromptSubmit hook) OR the transcript was written in the last 5s.
-working=0
-[ -f "$cache_dir/$session_id.working" ] && working=1
-if [ "$working" = 0 ] && [ -n "$transcript" ] && [ -f "$transcript" ]; then
-  tmt="$(stat -f %m "$transcript" 2>/dev/null || stat -c %Y "$transcript" 2>/dev/null || echo 0)"
-  [ "$(( NOW - tmt ))" -le 5 ] && working=1
-fi
-sicon="✻"
-if [ "$working" = 1 ]; then
-  # step ONE frame per second off NOW (no perl Time::HiRes); reads fine at any modest refreshInterval.
-  sframes=(✦ ✶ ✷ ✸ ✹ ✺); sicon="${sframes[$(( NOW % ${#sframes[@]} ))]}"
-fi
-
-# ONE perl pass for ALL char-aware (Cyrillic) work: name capitalisation + wrapping + colouring of
-# the name line, the zone divider, and the task/prev/path field blocks (no per-line bash forks).
-# Emits NUL-separated blocks: [0]=name [1]=divider [2]=EMPTY PLACEHOLDER (kept so the path blocks
-# stay at [5+i] — do NOT renumber) [3]=task [4]=prev [5..]=one path each.
-render_text() {
-  W="$W" BARMARG="${WCT_NAME_BAR_MARGIN:-1}" perl -CSA -Mutf8 -MText::Wrap -e '
-    my $W=$ENV{W}+0;
-    $Text::Wrap::columns=$W+1; $Text::Wrap::huge="wrap"; $Text::Wrap::unexpand=0;
-    my ($glyph,$name,$task,$prev,@dirs)=@ARGV;
-    $name =~ s/^(\s*)(\p{L})/$1.uc($2)/e;
-    my $E="\033"; my $RESET="${E}[0m"; my $BOLD="${E}[1m"; my $FGDEF="${E}[39m";
-    # Palette (Serg 2026-06-08): blue FILL bar at the top (white name); white dividers;
-    # grey task; greyer previous; folders white (in bash); a calm blue-grey for the path.
-    my $WHITE ="${E}[38;2;245;246;250m";  # name text on the bar
-    my $GREY  ="${E}[38;2;158;162;172m";  # task — grey
-    my $GREYER="${E}[38;2;110;114;124m";  # previous — greyer
-    my $PATH  ="${E}[38;2;124;138;162m";  # path — calm blue-grey
-    my $RULE  ="${E}[38;2;88;91;112m";    # dividers — dim, like Claude Code separators
-    my $NBG   ="${E}[48;2;72;142;255m";   # blue colour FILL — the top bar only
-    my $marg = ($ENV{BARMARG}//1)+0; $marg=0 if $marg<0;
-    my $lp = " " x $marg;                 # shared left text-indent for every text row
-    # NAME — full-width BLUE fill bar; white bold text (glyph + name); only the text is inset by $lp.
-    my @nl = split /\n/, Text::Wrap::wrap("  ","  ",$name), -1;
-    $_ =~ s/^  // for @nl;
-    my @nm = ("$glyph $nl[0]");
-    for my $i (1..$#nl) { push @nm, "  ".$nl[$i]; }
-    my $nameblock = join("\n", map { my $t=$lp.$_; my $p=$W-length($t); $p=0 if $p<0;
-                                     $NBG.$WHITE.$BOLD.$t.(" " x $p).$RESET } @nm);
-    # one wrapped, single-colour field (label+value share the colour); empty text → "". Every line
-    # gets the shared left text-indent ($lp) — applies to all text rows, not the dividers/bar.
-    sub field {
-      my ($c,$text)=@_; return "" if $text eq "";
-      my $lc = $c ne "" ? $c : $FGDEF;   # lead with a colour code (not a space) so CC will not trim the indent
-      join("\n", map { $lc.$lp.$_.$RESET } split /\n/, Text::Wrap::wrap("","   ",$text), -1);
-    }
-    my @b = ($nameblock,
-             $RULE.("─" x $W).$RESET,                                 # dividers — dim (CC-like)
-             field("",""),                                            # [2] RESERVED empty placeholder
-             field($GREY,   $task ne "" ? "▸ Задача: $task"    : ""),  # Задача — grey
-             field($GREYER, $prev ne "" ? "◃ Попередня: $prev" : "")); # Попередня — greyer
-    push @b, field($PATH,"↳ $_") for @dirs;                          # path — calm blue-grey
-    print join("", map { $_."\0" } @b);
-  ' -- "$@"
-}
-tb=()
-while IFS= read -r -d '' blk; do tb+=("$blk"); done \
-  < <(render_text "$sicon" "$name" "$task" "$prev" ${dirs[@]+"${dirs[@]}"})
-
-# meta-bar: chips joined by " · ", wrapping at $W onto fresh rows. Every row carries the same left
-# text-indent as the name bar (WCT_NAME_BAR_MARGIN) — text-only; dividers/the bar are not indented.
-mrg="${WCT_NAME_BAR_MARGIN:-1}"; case "$mrg" in ''|*[!0-9]*) mrg=1;; esac
-printf -v indent '%*s' "$mrg" ''
-cur=0; first=1
-# Each row begins with $FGDEF (a colour code) BEFORE the indent spaces, so the raw line never starts
-# with whitespace — otherwise Claude Code trims the leading spaces and the indent disappears.
-seg() { # $1=colored text  $2=plain text (for width)
-  local plen=${#2}
-  if [ "$first" -eq 0 ]; then
-    if [ $((cur + 3 + plen)) -gt "$W" ]; then printf '\n%b%s' "$FGDEF" "$indent"; cur=$mrg
-    else printf '%b' " · "; cur=$((cur + 3)); fi
-  fi
-  printf '%b' "$1"; cur=$((cur + plen)); first=0
-}
-newrow() { printf '\n%b%s' "$FGDEF" "$indent"; cur=$mrg; first=1; }
-# fmt_eta <epoch>: time left until <epoch> as 1h12m / 12m / <1m; empty if absent/past/invalid.
-fmt_eta() {
-  local rem h m; [ -z "${1:-}" ] && return 0
-  case "$1" in ''|*[!0-9]*) return 0;; esac
-  rem=$(( $1 - NOW )); [ "$rem" -le 0 ] && return 0
-  h=$(( rem / 3600 )); m=$(( (rem % 3600) / 60 ))
-  if   [ "$h" -gt 0 ]; then printf '%dh%02dm' "$h" "$m"
-  elif [ "$m" -gt 0 ]; then printf '%dm' "$m"
-  else printf '<1m'; fi
-}
 # git_branch <dir>: current branch, CACHED on disk ~5s (official statusline pattern). Cache hit =
 # 1 stat (+ a fork-free $(<file) read); git only runs once per 5s per dir, killing the git-storm.
 git_branch() {
@@ -283,11 +190,23 @@ git_branch() {
   printf '%s' "$br"
 }
 
+# fmt_eta <epoch>: time left until <epoch> as 1h12m / 12m / <1m; empty if absent/past/invalid.
+fmt_eta() {
+  local rem h m; [ -z "${1:-}" ] && return 0
+  case "$1" in ''|*[!0-9]*) return 0;; esac
+  rem=$(( $1 - NOW )); [ "$rem" -le 0 ] && return 0
+  h=$(( rem / 3600 )); m=$(( (rem % 3600) / 60 ))
+  if   [ "$h" -gt 0 ]; then printf '%dh%02dm' "$h" "$m"
+  elif [ "$m" -gt 0 ]; then printf '%dm' "$m"
+  else printf '<1m'; fi
+}
+
 # subagents running? Counted by mtime of agent-*.jsonl within a window (portable stat, no -newermt
 # which flaked; 20s window because agents write in bursts and a tight window gets missed; lingers
 # ~20s after they finish — acceptable). NOTE (rework 2026-06-07): the official subagent feed is NOT
-# reachable here — CC's structured `tasks` array is undocumented and absent from the statusLine stdin
-# on 2.1.168 (verified by dumping raw stdin); it only feeds the separate `subagentStatusLine` panel.
+# reachable here — CC's structured `tasks` array is undocumented and absent from the statusLine
+# stdin on 2.1.168 (verified by dumping raw stdin); it only feeds the separate `subagentStatusLine`
+# panel.
 agents_n=0; sess_sub="${transcript%.jsonl}/subagents"
 if [ -d "$sess_sub" ]; then
   for af in "$sess_sub"/agent-*.jsonl; do
@@ -299,19 +218,14 @@ fi
 
 # running WORKFLOWS? A workflow is a different beast from an ad-hoc subagent — a background script
 # that orchestrates many agents. DETECTION REWRITE (2026-06-19, after the chip never lit for a live
-# run): the per-run file <session>/workflows/wf_*.json is written ONLY at COMPLETION (it carries
-# durationMs / result / summary / status:"completed") — while a workflow RUNS there is no file and
-# nothing ever says "running", so grepping those files could never detect a live workflow (verified:
-# every wf_*.json across all sessions is "completed"). The Workflow tool also RETURNS IMMEDIATELY
-# ("Workflow launched in background. Task ID: X") and runs detached, so a plain tool_use→tool_result
-# pairing reads as done within milliseconds. The ONE reliable live signal is in the transcript:
+# run): the per-run file <session>/workflows/wf_*.json is written ONLY at COMPLETION, while a
+# workflow RUNS there is no file and nothing ever says "running", so grepping those files could
+# never detect a live workflow. The ONE reliable live signal is in the transcript:
 #   START  = a tool_result whose text is "Workflow launched in background…" (its .tool_use_id)
 #   FINISH = a later user message <task-notification> carrying that same <tool-use-id>
-# Running = launched ids with no matching completion notification. (Confirmed on a real live run:
-# wb3oyklnw ran 23:54→00:06 with no file the whole time.)
+# Running = launched ids with no matching completion notification.
 # COST GUARD (×N sessions/render): sessions that NEVER ran a workflow have no workflows/ dir → pay a
-# single [ -d ] test (0 forks). For the few that have, ONE jq pass over the transcript (~0.04s on a
-# 7.6MB file, measured) every refresh tick — cheap and gated.
+# single [ -d ] test (0 forks). For the few that have, ONE jq pass over the transcript every tick.
 wf_n=0; wf_dir="${transcript%.jsonl}/workflows"
 if [ -d "$wf_dir" ] && [ -n "$transcript" ] && [ -f "$transcript" ]; then
   wf_n=$(jq -rs '
@@ -323,28 +237,31 @@ if [ -d "$wf_dir" ] && [ -n "$transcript" ] && [ -f "$transcript" ]; then
   case "$wf_n" in ''|*[!0-9]*) wf_n=0;; esac
 fi
 
-# ============================ NAME + task/prev ============================================
-printf '%s' "${tb[0]}"                                       # <glyph> <Name> colour bar
-# content sits directly under the name bar — no divider between them (the bar is the separator).
-# NOTE: tb[2] is the RESERVED empty placeholder — never printed, never renumbered (the path rows
-# below rely on tb[5+di], so removing the slot would shift them onto the task line).
-[ -n "${tb[3]:-}" ] && printf '\n%s' "${tb[3]}"             # ▸ Задача
-[ -n "${tb[4]:-}" ] && printf '\n%s' "${tb[4]}"             # ◃ Попередня
-printf '\n%s' "${tb[1]}"                                     # divider (content | meta)
-
-# ============================ META ROW 1: id · CTX · 5h · ↺ · 7d ===========================
-newrow
-if [ "$session_id" != "nosess" ] && [ -n "$session_id" ]; then
-  seg "${CLAUDE}${BOLD}${sicon} ${session_id:0:8}${UNBOLD}${FGDEF}" "${sicon} ${session_id:0:8}"
+# "working" = explicit marker (UserPromptSubmit hook) OR the transcript was written in the last 5s.
+working=0
+[ -f "$cache_dir/$session_id.working" ] && working=1
+if [ "$working" = 0 ] && [ -n "$transcript" ] && [ -f "$transcript" ]; then
+  tmt="$(stat -f %m "$transcript" 2>/dev/null || stat -c %Y "$transcript" 2>/dev/null || echo 0)"
+  [ "$(( NOW - tmt ))" -le 5 ] && working=1
 fi
-[ -n "$ctx" ] && seg "◷ CTX ${ctx}%" "◷ CTX ${ctx}%"
-# Rate-limit chips use English unit letters (5h / 7d), not Cyrillic (Serg 2026-06-11). NOTE: this
-# CHANGED the scraped token text — external dashboards (Recon) that matched "◴ 5г N%" / "◴ 7д N%"
-# must update their patterns to "◴ 5h N%" / "◴ 7d N%".
-[ -n "$rl5" ] && seg "${DIM}◴ 5h ${rl5}%${UNBOLD}" "◴ 5h ${rl5}%"
-eta5="$(fmt_eta "$rl5_reset")"; [ -n "$eta5" ] && seg "${DIM}↺ ${eta5}${UNBOLD}" "↺ ${eta5}"
-# 7-day window: time UNTIL it resets, as a SEPARATE "↺ Nd" chip (clearer than "day N of 7", which
-# read as "7 left"; and consistent with the 5h chip's ↺ countdown). Days while ≥1 day remains, else hours.
+
+# «Активний» = маркер .working АБО біжать agents/wf (REFERENCE.md rule). Drives: the animated
+# glyph, the identity segment's border colour/rail, and the activity segment's colour/rail.
+# Coordination mail alone (coord_present) never sets busy — the segment shows but stays muted.
+busy=0
+[ "$working" = 1 ] && busy=1
+[ "${agents_n:-0}" -gt 0 ] && busy=1
+[ "${wf_n:-0}" -gt 0 ] && busy=1
+
+sicon="✻"
+if [ "$busy" = 1 ]; then
+  # step ONE frame per second off NOW (no perl Time::HiRes); reads fine at any modest refreshInterval.
+  sframes=(✦ ✶ ✷ ✸ ✹ ✺); sicon="${sframes[$(( NOW % ${#sframes[@]} ))]}"
+fi
+
+# ============================ vitals row fields (builtins only, no forks) ==================
+eta5="$(fmt_eta "$rl5_reset")"
+# 7-day window: time UNTIL it resets, as a SEPARATE "↺ Nd" chip. Days while ≥1 day remains, else hours.
 day7=""
 if [ -n "$rl7_reset" ]; then
   rem7=$(( rl7_reset - NOW ))
@@ -354,44 +271,232 @@ if [ -n "$rl7_reset" ]; then
     else hh7=$(( rem7 / 3600 )); { [ "$hh7" -ge 1 ] && day7="${hh7}h"; } || day7="<1h"; fi
   fi
 fi
-[ -n "$rl7" ] && seg "${DIM}◴ 7d ${rl7}%${UNBOLD}" "◴ 7d ${rl7}%"
-[ -n "$day7" ] && seg "${DIM}↺ ${day7}${UNBOLD}" "↺ ${day7}"
+modeldisp="${model_disp}${ctxsize}"
+prchip=""
+[ -n "$pr_num" ] && prchip="⇄ PR #${pr_num}${pr_state:+ ${pr_state}}"
 
-# ============================ META ROW 2: model · effort · PR ==============================
-newrow
-[ -n "$model_disp" ] && seg "◆ ${model_disp}${ctxsize}" "◆ ${model_disp}${ctxsize}"
-[ -n "$effort" ]     && seg "↯ ${effort}" "↯ ${effort}"
-# P7: PR chip from the JSON (no extra git call) — guarded, so it simply doesn't render until a PR exists.
-[ -n "$pr_num" ] && seg "${DIM}⇄ PR #${pr_num}${pr_state:+ ${pr_state}}${UNBOLD}" "⇄ PR #${pr_num}${pr_state:+ ${pr_state}}"
-
-# ============================ ACTIVITY ROW (subagents and/or workflows) ====================
-if [ "${agents_n:-0}" -gt 0 ] || [ "${wf_n:-0}" -gt 0 ]; then
-  newrow
-  if [ "${agents_n:-0}" -gt 0 ]; then
-    aframes=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏); aspin="${aframes[$(( NOW % ${#aframes[@]} ))]}"
-    seg "${AGCOL}${BOLD}${aspin} agents ×${agents_n}${UNBOLD}${FGDEF}" "${aspin} agents ×${agents_n}"
-  fi
-  if [ "${wf_n:-0}" -gt 0 ]; then
-    wflabel="⚙ wf"; [ "$wf_n" -gt 1 ] && wflabel="⚙ wf ×${wf_n}"
-    seg "${WFCOL}${BOLD}${wflabel}${UNBOLD}${FGDEF}" "$wflabel"
-  fi
+# ============================ activity row tokens ===========================================
+agentstok=""
+if [ "${agents_n:-0}" -gt 0 ]; then
+  aframes=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏); aspin="${aframes[$(( NOW % ${#aframes[@]} ))]}"
+  agentstok="${aspin} agents ×${agents_n}"
 fi
-
-# ============================ FOLDER / PATH ROWS ===========================================
-# One pair per working dir: ⌂ name · ⎇ branch, then its ↳ full path. ⌂ name is an OSC-8 link.
-if [ "${#dirs[@]}" -gt 0 ]; then
-  printf '\n%s' "${tb[1]}"                                   # divider (meta | paths)
-  di=0
-  for dd in ${dirs[@]+"${dirs[@]}"}; do
-    newrow
-    dn="${dd##*/}"                                           # basename via builtin (no fork)
-    printf -v dlink '\033]8;;file://%s\033\\\342\214\202 %s\033]8;;\033\\' "$dd" "$dn"
-    seg "${LIGHT}${dlink}${FGDEF}" "⌂ ${dn}"
-    dbr="$(git_branch "$dd")"
-    [ -n "$dbr" ] && seg "${LIGHT}↱ ${dbr}${FGDEF}" "↱ ${dbr}"
-    printf '\n%s' "${tb[$((5 + di))]:-↳ $dd}"                # pre-coloured ↳ path block
-    di=$((di + 1))
-  done
+wftok=""
+if [ "${wf_n:-0}" -gt 0 ]; then
+  wftok="⚙ wf"; [ "$wf_n" -gt 1 ] && wftok="⚙ wf ×${wf_n}"
 fi
-printf '%b' "$RESET"
+coordtok=""
+[ "$coord_present" = 1 ] && coordtok="⇅ coord"
+
+# ============================ place segment entries (name\x1fbranch\x1fpath per dir) =======
+place_args=()
+for dd in ${dirs[@]+"${dirs[@]}"}; do
+  dn="${dd##*/}"
+  dbr="$(git_branch "$dd")"
+  [ -z "$dbr" ] && dbr="—"
+  place_args+=("${dn}"$'\x1f'"${dbr}"$'\x1f'"${dd}")
+done
+
+# ONE perl pass for ALL char-aware (Cyrillic) work AND the entire box frame: role word-wrap, path
+# truncation, borders/separators/content-row padding, rails (single/double), colouring. Nothing
+# outside this call touches character widths. Emits the finished card (with embedded newlines) on
+# stdout — a single command substitution below, no new fork beyond this one perl process.
+render_text() {
+  W="$W" perl -CSA -Mutf8 -e '
+    my $W=$ENV{W}+0;
+    my ($glyph,$sid,$busy,$role,$ctx,$rl5,$eta5,$rl7,$day7,$modeldisp,$effort,$prchip,
+        $agentstok,$wftok,$coordtok,@rest)=@ARGV;
+    $busy = $busy ? 1 : 0;
+    $role =~ s/^(\s*)(\p{L})/$1.uc($2)/e;
+
+    my $E="\033"; my $RESET="${E}[0m"; my $BOLD="${E}[1m";
+    my $WHITE ="${E}[38;2;245;246;250m";   # role text
+    my $GREY  ="${E}[38;2;158;162;172m";   # vitals / activity counters
+    my $PATHC ="${E}[38;2;124;138;162m";   # place path
+    my $ACTIVE="${E}[38;2;217;119;87m";    # active border/rail — terracotta
+    my $INACTIVE="${E}[38;2;58;69;92m";    # inactive border/rail — muted
+
+    my $TL = "\x{E87E}"; my $TR = "┐"; my $BL = "└"; my $BR = "\x{E881}";
+    my $VBAR = "│"; my $SEPL = "├"; my $SEPR = "┤";
+    my $BRANCHG = "↱";
+
+    my $NARROW_THRESHOLD = 60;
+    my $narrow = $W < $NARROW_THRESHOLD;
+
+    sub rail_char { my ($a)=@_; return $a ? "═" : "─"; }
+    sub colorize  { my ($t,$rgb,$bold)=@_; return (($bold?$BOLD:"").$rgb.$t.$RESET); }
+
+    sub top_border {
+      my ($width,$active,$glyph,$sid)=@_;
+      my $r = rail_char($active);
+      my $n = $width - (7 + length($sid)); $n = 0 if $n < 0;
+      my $rgb = $active ? $ACTIVE : $INACTIVE;
+      my $rail_run = $r." ".$glyph." ".$sid." ".($r x $n);
+      return $TL.colorize($rail_run,$rgb,0).$TR;
+    }
+    sub bottom_border {
+      my ($width,$active)=@_;
+      my $r=rail_char($active); my $rgb=$active?$ACTIVE:$INACTIVE;
+      return $BL.colorize($r x ($width-2),$rgb,0).$BR;
+    }
+    sub separator {
+      my ($width,$active)=@_;
+      my $r=rail_char($active); my $rgb=$active?$ACTIVE:$INACTIVE;
+      return $SEPL.colorize($r x ($width-2),$rgb,0).$SEPR;
+    }
+    sub content_row {
+      my ($width,$text,$rgb,$bold)=@_;
+      my $body = $width-2;
+      my $inner = " ".$text;
+      if (length($inner) > $body) { $inner = substr($inner,0,$body-1)."…"; }
+      $inner .= (" " x ($body-length($inner))) if length($inner) < $body;
+      my $rendered = $rgb ? colorize($inner,$rgb,$bold) : $inner;
+      return $VBAR.$rendered.$VBAR;
+    }
+
+    sub truncate_path {
+      my ($path,$budget)=@_;
+      return $path if length($path) <= $budget;
+      my @parts = split m{/}, $path, -1;
+      for my $i (1..$#parts) {
+        my $cand = "…/".join("/", @parts[$i..$#parts]);
+        return $cand if length($cand) <= $budget;
+      }
+      my $last = $parts[-1];
+      my $cand = "…/".$last;
+      return $cand if length($cand) <= $budget;
+      return "…" if $budget <= 1;
+      return "…".substr($last, -($budget-1));
+    }
+
+    # Greedy word-wrap mirroring python textwrap(width=budget, subsequent_indent="  ",
+    # break_long_words=False, break_on_hyphens=False): never split a word or a hyphen, only wrap
+    # at whitespace; continuation lines carry a literal 2-space indent baked into the string (so
+    # content_row own 1-space pad reproduces the reference 3-space hanging indent).
+    sub wrap_role {
+      my ($text,$width)=@_;
+      my $budget = ($width-3)-1; $budget=1 if $budget<1;
+      my $cont_budget = $budget-2; $cont_budget=1 if $cont_budget<1;
+      my @words = split /\s+/, $text;
+      my @lines; my $cur="";
+      for my $w (@words) {
+        next if $w eq "";
+        my $bud = @lines ? $cont_budget : $budget;
+        my $cand = $cur eq "" ? $w : "$cur $w";
+        if (length($cand) <= $bud) { $cur = $cand; }
+        else { push(@lines,$cur) if $cur ne ""; $cur = $w; }
+      }
+      push(@lines,$cur) if $cur ne "" || !@lines;
+      my @out;
+      for my $i (0..$#lines) { push @out, ($i==0 ? $lines[$i] : "  ".$lines[$i]); }
+      return @out;
+    }
+
+    sub build_place_lines {
+      my ($entries,$width,$narrow)=@_;
+      my $budget_total = $width-3;
+      my @lines;
+      for my $e (@$entries) {
+        my ($name,$branch,$path) = @$e;
+        if ($narrow) {
+          push @lines, "⌂ $name  $BRANCHG $branch";
+          my $pb = $budget_total; $pb=1 if $pb<1;
+          push @lines, truncate_path($path,$pb);
+        } else {
+          my $prefix = "⌂ $name  $BRANCHG $branch  ↳ ";
+          my $pb = $budget_total - length($prefix); $pb=1 if $pb<1;
+          my $ptext = length($path) <= $pb ? $path : truncate_path($path,$pb);
+          my $line = $prefix.$ptext;
+          if (length($line) > $budget_total) { $line = substr($line,0,$budget_total-1)."…"; }
+          push @lines, $line;
+        }
+      }
+      return @lines;
+    }
+
+    my @entries;
+    for my $r (@rest) {
+      my @f = split /\x1f/, $r, -1;
+      push @entries, [$f[0]//"", $f[1]//"", $f[2]//""];
+    }
+
+    my @v1;
+    push @v1, "◷ CTX ${ctx}%" if $ctx ne "";
+    push @v1, "◴ 5h ${rl5}%" if $rl5 ne "";
+    push @v1, "↺ ${eta5}" if $eta5 ne "";
+    push @v1, "◴ 7d ${rl7}%" if $rl7 ne "";
+    push @v1, "↺ ${day7}" if $day7 ne "";
+    my $vitals1 = join("  ", @v1);
+
+    my @v2;
+    push @v2, "◆ ${modeldisp}" if $modeldisp ne "";
+    push @v2, "↯ ${effort}" if $effort ne "";
+    push @v2, $prchip if $prchip ne "";
+    my $vitals2 = join("  ", @v2);
+
+    my @act;
+    push @act, $agentstok if $agentstok ne "";
+    push @act, $wftok if $wftok ne "";
+    push @act, $coordtok if $coordtok ne "";
+    my $activity = join("  ", @act);
+    my $activity_present = ($activity ne "");
+
+    my @role_lines = wrap_role($role, $W);
+    my @rows;
+
+    if ($narrow) {
+      # "Вузька ширина <60: злиття identity+vitals, з лічильників лише CTX."
+      my @merged = @role_lines;
+      push @merged, "◷ CTX ${ctx}%" if $ctx ne "";
+      push @merged, $activity if $activity_present;
+      my $merged_active = $busy;
+      my @place_lines = build_place_lines(\@entries, $W, 1);
+
+      push @rows, top_border($W, $merged_active, $glyph, $sid);
+      for my $ln (@merged) {
+        if (grep { $_ eq $ln } @role_lines) { push @rows, content_row($W, $ln, $WHITE, 1); }
+        else { push @rows, content_row($W, $ln, $GREY, 0); }
+      }
+      push @rows, separator($W, $merged_active);
+      for my $ln (@place_lines) {
+        my $rgb = ($ln =~ /^[⌂…\/]/) ? $PATHC : $GREY;
+        push @rows, content_row($W, $ln, $rgb, 0);
+      }
+      push @rows, bottom_border($W, 0);
+    } else {
+      my @blocks;   # [ \@lines, $active, $kind ]
+      push @blocks, [\@role_lines, $busy, "role"];
+      my @vlines = grep { $_ ne "" } ($vitals1, $vitals2);
+      push @blocks, [\@vlines, 0, "vitals"];
+      if ($activity_present) { push @blocks, [[$activity], $busy, "activity"]; }
+      my @place_lines = build_place_lines(\@entries, $W, 0);
+      push @blocks, [\@place_lines, 0, "place"];
+
+      push @rows, top_border($W, $blocks[0][1], $glyph, $sid);
+      for my $bi (0..$#blocks) {
+        my ($lines,$active,$kind) = @{$blocks[$bi]};
+        for my $ln (@$lines) {
+          if    ($kind eq "role")  { push @rows, content_row($W, $ln, $WHITE, 1); }
+          elsif ($kind eq "place") {
+            my $rgb = ($ln =~ /^[⌂…\/]/) ? $PATHC : $GREY;
+            push @rows, content_row($W, $ln, $rgb, 0);
+          } else { push @rows, content_row($W, $ln, $GREY, 0); }
+        }
+        if ($bi < $#blocks) {
+          my $next_active = $blocks[$bi+1][1];
+          push @rows, separator($W, $active || $next_active);
+        }
+      }
+      push @rows, bottom_border($W, $blocks[-1][1]);
+    }
+
+    print join("\n", @rows);
+  ' -- "$@"
+}
+
+card="$(render_text "$sicon" "${session_id:0:8}" "$busy" "$name" \
+  "$ctx" "$rl5" "$eta5" "$rl7" "$day7" "$modeldisp" "$effort" "$prchip" \
+  "$agentstok" "$wftok" "$coordtok" ${place_args[@]+"${place_args[@]}"}
+)"
+printf '%s\n' "$card"
 exit 0
