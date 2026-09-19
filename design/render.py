@@ -20,9 +20,15 @@ Usage:
     python3 render.py --audit                  # width-gate: 7 states x 2 cut levels x 6 widths
     python3 render.py --verify                 # diff generated output against REFERENCE.md
     python3 render.py --no-color               # force plain text (also respects NO_COLOR env var)
+    python3 render.py --layout path/to.conf     # use an alternate layout config (default:
+                                                  design/layout.conf, next to this file)
 
-Segments (in order, ALWAYS present — none of them appears or disappears based
-on runtime state):
+Segments, their order, and which tokens appear in each, are NOT hardcoded here —
+they are read from `layout.conf` (see that file's header comment for the format).
+statusline.sh (the production status line) reads the SAME file, so editing it
+changes both renderers identically. If layout.conf is missing or unparsable,
+this script falls back to the built-in default below, which matches the
+originally-approved REFERENCE.md layout exactly:
   1. role     — activity glyph + role text (wrapped, hang-indented)
   2. id       — activity glyph + session id + rate/context counters
   3. engine   — model + effort, and on the SAME line any movement indicators
@@ -38,7 +44,7 @@ import re
 import sys
 import textwrap
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 # --------------------------------------------------------------------------
 # Glyphs & box-drawing
@@ -100,6 +106,83 @@ def colorize(text: str, rgb, bold: bool = False, enabled: bool = True) -> str:
 
 
 # --------------------------------------------------------------------------
+# Layout config (design/layout.conf) — read by BOTH this renderer and
+# statusline.sh. See layout.conf's header comment for the exact format.
+# --------------------------------------------------------------------------
+
+DEFAULT_LAYOUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "layout.conf")
+
+DEFAULT_LAYOUT_ORDER = ["role", "id", "engine", "place"]
+DEFAULT_LAYOUT_SEGMENTS: Dict[str, dict] = {
+    "role":   {"tokens": ["role"], "narrow_tokens": None, "active": "never", "narrow_layout": "inline"},
+    "id":     {"tokens": ["id", "ctx", "rl5", "eta5", "rl7", "eta7"], "narrow_tokens": ["id", "ctx"],
+               "active": "never", "narrow_layout": "inline"},
+    "engine": {"tokens": ["model", "effort", "pr", "agents", "wf", "coord"], "narrow_tokens": None,
+               "active": "busy", "narrow_layout": "inline"},
+    "place":  {"tokens": ["dir", "branch", "path"], "narrow_tokens": None, "active": "never",
+               "narrow_layout": "split"},
+}
+
+
+def load_layout(path: Optional[str] = None) -> Tuple[List[str], Dict[str, dict]]:
+    """Parse layout.conf. Falls back to the built-in default (matching the
+    originally-approved REFERENCE.md layout) if the file is missing, empty,
+    or doesn't declare an `order:` line."""
+    path = path or DEFAULT_LAYOUT_PATH
+    order: List[str] = []
+    segments: Dict[str, dict] = {}
+    cur: Optional[str] = None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            raw_lines = f.readlines()
+    except OSError:
+        raw_lines = []
+
+    for raw in raw_lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(r"^order:\s*(.+)$", line)
+        if m:
+            order = m.group(1).split()
+            continue
+        m = re.match(r"^\[(\w+)\]$", line)
+        if m:
+            cur = m.group(1)
+            segments[cur] = {"tokens": [], "narrow_tokens": None, "active": "never", "narrow_layout": "inline"}
+            continue
+        if cur is None:
+            continue  # directive before any [segment] header — ignore
+        m = re.match(r"^tokens:\s*(.*)$", line)
+        if m:
+            segments[cur]["tokens"] = m.group(1).split()
+            continue
+        m = re.match(r"^narrow_tokens:\s*(.*)$", line)
+        if m:
+            segments[cur]["narrow_tokens"] = m.group(1).split()
+            continue
+        m = re.match(r"^active:\s*(\S+)$", line)
+        if m:
+            segments[cur]["active"] = m.group(1)
+            continue
+        m = re.match(r"^narrow_layout:\s*(\S+)$", line)
+        if m:
+            segments[cur]["narrow_layout"] = m.group(1)
+            continue
+        # unrecognized directive — ignore (forward-compatible, never crashes the card)
+
+    if not order:
+        return list(DEFAULT_LAYOUT_ORDER), {k: dict(v) for k, v in DEFAULT_LAYOUT_SEGMENTS.items()}
+    # fill in any segment named in `order:` but missing its own [block] with safe defaults
+    for name in order:
+        segments.setdefault(name, {"tokens": [], "narrow_tokens": None, "active": "never", "narrow_layout": "inline"})
+    return order, segments
+
+
+LAYOUT_ORDER, LAYOUT_SEGMENTS = load_layout()
+
+
+# --------------------------------------------------------------------------
 # Data model
 # --------------------------------------------------------------------------
 
@@ -115,7 +198,13 @@ class Scene:
     label: str
     role: str                      # raw role text, BEFORE the 160-char cut
     busy: bool                     # drives the activity glyph (calm ✻ / busy demo frame)
-    activity: List[str] = field(default_factory=list)  # movement tokens appended to the engine line
+    # Movement chips, one field per `engine` token in the layout config — kept as separate,
+    # already-fully-formatted strings (not a generic list) so the config can reorder or drop
+    # them independently, the same way statusline.sh's prchip/agentstok/wftok/coordtok work.
+    pr: str = ""
+    agents: str = ""
+    wf: str = ""
+    coord: str = ""
     place: List[PlaceEntry] = field(default_factory=list)
     width: int = 80                # canonical width for the standalone demo print
     cut: str = "round"             # "round" | "none" — canonical cut level for the demo print
@@ -164,14 +253,18 @@ PLACE_MULTI = [
 ]
 
 SCENES: List[Scene] = [
-    Scene("Стан 1 — спокій", ROLE_ORCH, False, [], PLACE_SINGLE, 80, "round"),
+    Scene("Стан 1 — спокій", ROLE_ORCH, False, place=PLACE_SINGLE, width=80, cut="round"),
     Scene("Стан 2 — біжать агенти + координаційна пошта (еталонний кадр, без підсвітки рейок)",
-          ROLE_ORCH, True, ["⠹ agents ×1", "⇅ coord"], PLACE_SINGLE, 80, "round", highlight=False),
-    Scene("Стан 3 — воркфлоу (з підсвіткою рейок)", ROLE_ORCH, True, ["⚙ wf ×1"], PLACE_SINGLE, 80, "round"),
-    Scene("Стан 4 — кілька тек", ROLE_ORCH, False, [], PLACE_MULTI, 80, "round"),
-    Scene("Стан 5 — роль на 160+ символів", ROLE_EXAMPLECLIENT_RAW, False, [], PLACE_SINGLE, 80, "round"),
-    Scene("Стан 6 — 38 колонок, busy", ROLE_ORCH, True, ["⠹ agents ×1", "⇅ coord"], PLACE_SINGLE, 38, "round"),
-    Scene("Стан 7 — рівень зрізу none", ROLE_ORCH, False, [], PLACE_SINGLE, 80, "none"),
+          ROLE_ORCH, True, agents="⠹ agents ×1", coord="⇅ coord",
+          place=PLACE_SINGLE, width=80, cut="round", highlight=False),
+    Scene("Стан 3 — воркфлоу (з підсвіткою рейок)", ROLE_ORCH, True, wf="⚙ wf ×1",
+          place=PLACE_SINGLE, width=80, cut="round"),
+    Scene("Стан 4 — кілька тек", ROLE_ORCH, False, place=PLACE_MULTI, width=80, cut="round"),
+    Scene("Стан 5 — роль на 160+ символів", ROLE_EXAMPLECLIENT_RAW, False,
+          place=PLACE_SINGLE, width=80, cut="round"),
+    Scene("Стан 6 — 38 колонок, busy", ROLE_ORCH, True, agents="⠹ agents ×1", coord="⇅ coord",
+          place=PLACE_SINGLE, width=38, cut="round"),
+    Scene("Стан 7 — рівень зрізу none", ROLE_ORCH, False, place=PLACE_SINGLE, width=80, cut="none"),
 ]
 
 NARROW_THRESHOLD = 60  # "Вузька ширина <60: з лічильників лише CTX."
@@ -300,73 +393,139 @@ def content_row(width: int, text: str, color: bool, rgb=None, bold: bool = False
 
 
 # --------------------------------------------------------------------------
-# Place segment
+# Token values — the token catalogue described in layout.conf's header.
+# Each function returns "" when the token has no value to show right now
+# (e.g. `pr` with no open PR); build_segment_lines() drops empty tokens.
 # --------------------------------------------------------------------------
 
-def build_place_lines(entries: List[PlaceEntry], width: int, narrow: bool) -> List[str]:
+def token_value_id(tok: str, glyph: str) -> str:
+    if tok == "id":
+        return f"{glyph} {SESSION_ID}"
+    if tok == "ctx":
+        return f"◷ CTX {CTX}" if CTX else ""
+    if tok == "rl5":
+        return f"◴ 5h {P5H}" if P5H else ""
+    if tok == "eta5":
+        return f"↺ {ETA5H}" if ETA5H else ""
+    if tok == "rl7":
+        return f"◴ 7d {P7D}" if P7D else ""
+    if tok == "eta7":
+        return f"↺ {ETA7D}" if ETA7D else ""
+    return ""
+
+
+def token_value_engine(tok: str, scene: Scene) -> str:
+    if tok == "model":
+        return f"◆ {MODEL}" if MODEL else ""
+    if tok == "effort":
+        return f"↯ {EFFORT}" if EFFORT else ""
+    if tok == "pr":
+        return scene.pr
+    if tok == "agents":
+        return scene.agents
+    if tok == "wf":
+        return scene.wf
+    if tok == "coord":
+        return scene.coord
+    return ""
+
+
+def token_value_place_lead(tok: str, entry: PlaceEntry) -> str:
+    if tok == "dir":
+        return f"⌂ {entry.name}"
+    if tok == "branch":
+        return f"{BRANCH_GLYPH} {entry.branch}"
+    return ""
+
+
+# --------------------------------------------------------------------------
+# Segment builders — config-driven
+# --------------------------------------------------------------------------
+
+def build_place_lines(entries: List[PlaceEntry], width: int, narrow: bool,
+                       tokens: List[str], narrow_layout: str) -> List[str]:
     lines: List[str] = []
     budget_total = width - 3
+    has_path = "path" in tokens
+    lead_tokens = [t for t in tokens if t != "path"]
     for entry in entries:
-        if narrow:
-            # "шлях переїхав на власний рядок" — icon+branch on one line,
-            # bare truncated path on its own line (no icon prefix).
-            lines.append(f"⌂ {entry.name}  {BRANCH_GLYPH} {entry.branch}")
+        lead_parts = [v for t in lead_tokens if (v := token_value_place_lead(t, entry))]
+        lead_str = "  ".join(lead_parts)
+        if narrow and narrow_layout == "split" and has_path:
+            # icon+branch (etc.) on one line, bare truncated path on its own line, no icon prefix
+            lines.append(lead_str)
             path_budget = max(1, budget_total)
             lines.append(truncate_path(entry.path, path_budget))
-        else:
-            prefix = f"⌂ {entry.name}  {BRANCH_GLYPH} {entry.branch}  ↳ "
+        elif has_path:
+            prefix = (lead_str + "  ↳ ") if lead_str else "↳ "
             path_budget = max(1, budget_total - len(prefix))
             path_text = entry.path if len(entry.path) <= path_budget else truncate_path(entry.path, path_budget)
             line = prefix + path_text
             if len(line) > budget_total:
                 line = line[: budget_total - 1] + "…"
             lines.append(line)
+        else:
+            line = lead_str
+            if len(line) > budget_total:
+                line = line[: budget_total - 1] + "…"
+            lines.append(line)
     return lines
+
+
+def build_segment_lines(seg_name: str, seg_cfg: dict, width: int, narrow: bool,
+                         scene: Scene, glyph: str) -> List[str]:
+    tokens = seg_cfg["tokens"]
+    if narrow and seg_cfg.get("narrow_tokens") is not None:
+        tokens = seg_cfg["narrow_tokens"]
+
+    if seg_name == "role":
+        return wrap_role(scene.role, width, glyph)
+    if seg_name == "id":
+        parts = [v for t in tokens if (v := token_value_id(t, glyph))]
+        return ["  ".join(parts)]
+    if seg_name == "engine":
+        parts = [v for t in tokens if (v := token_value_engine(t, scene))]
+        return wrap_tokens(parts, width)
+    if seg_name == "place":
+        narrow_layout = seg_cfg.get("narrow_layout", "inline")
+        return build_place_lines(scene.place, width, narrow, tokens, narrow_layout)
+    return []
+
+
+def segment_active(seg_name: str, seg_cfg: dict, scene: Scene) -> bool:
+    if seg_cfg.get("active") != "busy":
+        return False
+    if seg_name == "engine" and scene.highlight is not None:
+        return scene.highlight
+    return scene.busy
 
 
 # --------------------------------------------------------------------------
 # Card assembly
 # --------------------------------------------------------------------------
 
-def build_card(scene: Scene, width: int, cut: str, color: bool = False) -> List[str]:
+def build_card(scene: Scene, width: int, cut: str, color: bool = False,
+                layout_order: Optional[List[str]] = None,
+                layout_segments: Optional[Dict[str, dict]] = None) -> List[str]:
+    order = layout_order if layout_order is not None else LAYOUT_ORDER
+    segments = layout_segments if layout_segments is not None else LAYOUT_SEGMENTS
+
     corners = CUT_ROUND if cut == "round" else CUT_NONE
     tl, tr, bl, br = corners
     narrow = width < NARROW_THRESHOLD
     glyph = GLYPH_BUSY_DEMO if scene.busy else GLYPH_CALM
 
-    role_lines = wrap_role(scene.role, width, glyph)
-
-    # --- segment 2: id + counters ---
-    if narrow:
-        # "Вузька ширина <60: з лічильників лише CTX."
-        id_line = f"{glyph} {SESSION_ID}  ◷ CTX {CTX}"
-    else:
-        id_line = f"{glyph} {SESSION_ID}  ◷ CTX {CTX}  ◴ 5h {P5H}  ↺ {ETA5H}  ◴ 7d {P7D}  ↺ {ETA7D}"
-    id_lines = [id_line]
-
-    # --- segment 3: engine (model + effort) + movement, ALWAYS one segment,
-    # ALWAYS present — the movement tokens are appended to the SAME line when
-    # there is something to show, never a segment of their own. ---
-    engine_parts = [f"◆ {MODEL}", f"↯ {EFFORT}"]
-    engine_parts.extend(scene.activity)
-    engine_lines = wrap_tokens(engine_parts, width)
-
-    # --- segment 4: place ---
-    place_lines = build_place_lines(scene.place, width, narrow)
-
-    # Four segments, always, in this order. Only segment 3 (engine+movement)
-    # can be "active"; segments 1/2/4 never carry their own active flag. A
-    # separator lights up (double rail) if either of the two segments it sits
-    # between is active — so only the id|engine and engine|place separators
-    # can ever go double; the role|id separator and the outer top/bottom
-    # borders stay a plain single rail.
-    engine_active = scene.busy if scene.highlight is None else scene.highlight
-    blocks: List[Tuple[List[str], bool, str]] = [
-        (role_lines, False, "role"),
-        (id_lines, False, "id"),
-        (engine_lines, engine_active, "engine"),
-        (place_lines, False, "place"),
-    ]
+    # Four segments, always, in the configured order. A separator lights up
+    # (double rail) if either segment it sits between is active — so only
+    # the rails bordering an "active"-configured segment can ever go double;
+    # everything else (including the outer top/bottom borders) stays single.
+    blocks: List[Tuple[List[str], bool, str]] = []
+    for seg_name in order:
+        seg_cfg = segments.get(seg_name, {"tokens": [], "narrow_tokens": None,
+                                           "active": "never", "narrow_layout": "inline"})
+        lines = build_segment_lines(seg_name, seg_cfg, width, narrow, scene, glyph)
+        active = segment_active(seg_name, seg_cfg, scene)
+        blocks.append((lines, active, seg_name))
 
     rows: List[str] = []
     rows.append(plain_border(width, tl, tr, False, color))
@@ -491,10 +650,15 @@ def main():
     parser.add_argument("--audit", action="store_true", help="run the width gate over all states x cuts x widths")
     parser.add_argument("--verify", action="store_true", help="diff generated output against REFERENCE.md")
     parser.add_argument("--ref", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "REFERENCE.md"))
+    parser.add_argument("--layout", default=None, help="path to layout.conf (default: design/layout.conf)")
     parser.add_argument("--no-color", action="store_true", help="force plain text output")
     args = parser.parse_args()
 
     color = (not args.no_color) and (os.environ.get("NO_COLOR") is None) and sys.stdout.isatty()
+
+    if args.layout:
+        global LAYOUT_ORDER, LAYOUT_SEGMENTS
+        LAYOUT_ORDER, LAYOUT_SEGMENTS = load_layout(args.layout)
 
     if args.audit:
         sys.exit(action_audit())
