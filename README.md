@@ -4,10 +4,41 @@ A live **status card** for every Claude Code chat. It renders inside the termina
 (the bar at the bottom of the terminal window) and keeps a short summary of what each session is
 for, updated automatically in the background as the conversation goes on.
 
-<!--
-TODO before publishing: insert an up-to-date ASCII example of the rendered card here, taken from
-design/REFERENCE.md once its layout is finalized (an idle-state frame and a busy-state frame).
--->
+It looks like this — four segments, always in the same order (role, session id + context
+counters, model + activity, project folder):
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│ ✻ Orchestrator. only launches agents, doesn't do the work itself           │
+├────────────────────────────────────────────────────────────────────────────┤
+│ ✻ 093797da  ◷ CTX 41%  ◴ 5h 22%  ↺ 1h12m  ◴ 7d 63%  ↺ 4d                   │
+├────────────────────────────────────────────────────────────────────────────┤
+│ ◆ Opus 5 1M  ↯ high                                                        │
+├────────────────────────────────────────────────────────────────────────────┤
+│ ⌂ my-project  ↱ main  ↳ ~/dev/my-project                                   │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+...and while something is running (an agent, a background job), the model+activity segment picks
+up an activity indicator and its rails turn "active" (double `═` — a second signal channel, so it
+still reads correctly with `NO_COLOR=1`):
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│ ✹ Orchestrator. only launches agents, doesn't do the work itself           │
+├────────────────────────────────────────────────────────────────────────────┤
+│ ✹ 093797da  ◷ CTX 41%  ◴ 5h 22%  ↺ 1h12m  ◴ 7d 63%  ↺ 4d                   │
+├════════════════════════════════════════════════════════════════════════════┤
+│ ◆ Opus 5 1M  ↯ high  ⠹ agents ×1                                           │
+├════════════════════════════════════════════════════════════════════════════┤
+│ ⌂ my-project  ↱ main  ↳ ~/dev/my-project                                   │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+> The role/task text is whatever your background summarizer writes — it follows the language of
+> your chat. Shown here with plain corners (`┌ ┐ └ ┘`) — see [Requirements](#requirements): with
+> the optional `TempusGlyphs` font installed, the top-left/bottom-right corners render as a smooth
+> cut instead.
 
 …plus a **role-keeper**: at session start it asks for the chat's role and remembers what you say,
 so the card doesn't have to guess from scratch every time.
