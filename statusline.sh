@@ -460,15 +460,25 @@ render_text() {
     # Top/bottom border — a PLAIN, ALWAYS-single rail, corner to corner. No id, no glyph: those
     # live inside the role/id content segments now, not in the frame. There is no more
     # "active"/double-rail variant (removed 2026-09-19, follow-up) — the border never changes.
+    # COLOUR FIX (2026-09-19, later same day): the corner glyphs ($left/$right) and the "│"
+    # bars in content_row() were being emitted RAW, with no colorize() call at all — only the
+    # "─" dash fill (here and in separator()) ever got wrapped in $INACTIVE. A raw glyph
+    # carries no SGR escape of its own, so the terminal painted it in whatever colour was still
+    # active from the PREVIOUS \033[0m reset (its own default foreground) — visibly different
+    # from the dashes, which is exactly the "sides one colour, rails another colour" defect
+    # reported live. Fix: every frame glyph (corners, "│", "├"/"┤") is now wrapped in
+    # colorize(..., $INACTIVE, 0) too, same as the dashes — one colour, the whole rectangle.
+    # Zero-width ANSI codes, so this cannot change $width or any column math (content_budget()
+    # etc. are untouched).
     sub plain_border {
       my ($width,$left,$right)=@_;
       my $rgb=$INACTIVE;
-      return $left.colorize("─" x ($width-2),$rgb,0).$right;
+      return colorize($left,$rgb,0).colorize("─" x ($width-2),$rgb,0).colorize($right,$rgb,0);
     }
     sub separator {
       my ($width)=@_;
       my $rgb=$INACTIVE;   # uniform frame colour — see $INACTIVE above
-      return $SEPL.colorize("─" x ($width-2),$rgb,0).$SEPR;
+      return colorize($SEPL,$rgb,0).colorize("─" x ($width-2),$rgb,0).colorize($SEPR,$rgb,0);
     }
     sub content_row {
       my ($width,$text,$rgb,$bold)=@_;
@@ -485,7 +495,10 @@ render_text() {
       $inner .= (" " x ($text_budget-length($inner))) if length($inner) < $text_budget;
       $inner = (" " x $INSET).$inner.(" " x $INSET);
       my $rendered = $rgb ? colorize($inner,$rgb,$bold) : $inner;
-      return $VBAR.$rendered.$VBAR;
+      # The "│" bars are frame, not text: always $INACTIVE, regardless of $rgb/$bold used for
+      # the text between them (see colour-fix note above plain_border()).
+      my $bar = colorize($VBAR,$INACTIVE,0);
+      return $bar.$rendered.$bar;
     }
 
     sub truncate_path {

@@ -379,9 +379,22 @@ def plain_border(width: int, left: str, right: str, color: bool) -> str:
     # live preview and didn't want a colour change here). The double `═` rail that used to be
     # the colourless activity signal is ALSO gone now (2026-09-19, follow-up) — busy is
     # signalled only by the glyph in the role/id text, never by the frame.
+    #
+    # COLOUR FIX (2026-09-19, later same day): `left`/`right` (the corner glyphs) used to be
+    # concatenated in RAW, uncoloured — only `fill` (the dash run) was ever passed through
+    # colorize(). A raw glyph carries no SGR escape, so the terminal painted it in whatever
+    # colour was left active by the previous colorize() call's RESET (the terminal's own
+    # default foreground) — visibly different from the dashes. That is the live "sides one
+    # colour, rails another colour" defect. Fix: wrap the corners in colorize() too, same rgb
+    # as the fill — one colour for the whole border. Escape codes are zero-width, so `width`
+    # and the assert below are unaffected.
     rgb = RGB_INACTIVE
     fill = RAIL_INACTIVE * (width - 2)
-    line = left + colorize(fill, rgb, enabled=color) + right
+    line = (
+        colorize(left, rgb, enabled=color)
+        + colorize(fill, rgb, enabled=color)
+        + colorize(right, rgb, enabled=color)
+    )
     plain_len = 1 + len(fill) + 1
     assert plain_len == width, f"border width mismatch: {plain_len} != {width}"
     return line
@@ -390,7 +403,13 @@ def plain_border(width: int, left: str, right: str, color: bool) -> str:
 def separator(width: int, color: bool) -> str:
     rgb = RGB_INACTIVE  # uniform frame colour — see plain_border() above
     fill = RAIL_INACTIVE * (width - 2)
-    return SEP_L + colorize(fill, rgb, enabled=color) + SEP_R
+    # COLOUR FIX (2026-09-19): SEP_L/SEP_R ("├"/"┤") are now colorize()d too — see the note
+    # above plain_border() for why the raw corner glyphs were the actual bug.
+    return (
+        colorize(SEP_L, rgb, enabled=color)
+        + colorize(fill, rgb, enabled=color)
+        + colorize(SEP_R, rgb, enabled=color)
+    )
 
 
 def content_row(width: int, text: str, color: bool, rgb=None, bold: bool = False) -> str:
@@ -407,7 +426,12 @@ def content_row(width: int, text: str, color: bool, rgb=None, bold: bool = False
     inner = inner.ljust(text_budget)
     inner = (" " * INSET) + inner + (" " * INSET)
     rendered = colorize(inner, rgb, bold=bold, enabled=color) if rgb else inner
-    line = VBAR + rendered + VBAR
+    # COLOUR FIX (2026-09-19): the "│" bars are FRAME, not text — always RGB_INACTIVE,
+    # regardless of the `rgb`/`bold` used for the text between them (role white, id/engine
+    # grey, path blue-grey, …). Previously they were raw VBAR with no colorize() at all — see
+    # the note above plain_border() for the mechanism.
+    bar = colorize(VBAR, RGB_INACTIVE, enabled=color)
+    line = bar + rendered + bar
     plain_len = 1 + len(inner) + 1
     assert plain_len == width, f"content_row width mismatch: {plain_len} != {width}"
     return line
