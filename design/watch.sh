@@ -69,6 +69,7 @@ draw() {
   done
   echo "Правила ширини/токенів — дивись коментар на початку $LAYOUT."
   echo "Після правки: python3 render.py --verify && python3 render.py --audit"
+  echo "Прев'ю в середовищах (Claude Code реальний / Codex макет): ./preview-env.sh"
 }
 
 printf '\033[?25l'   # hide cursor while the preview is live
