@@ -63,7 +63,10 @@ CUT_NONE = ("┌", "┐", "└", "┘")
 VBAR = "│"
 SEP_L = "├"
 SEP_R = "┤"
-RAIL_ACTIVE = "═"     # second signal channel besides color — must work under NO_COLOR=1
+# The rail is ALWAYS this single character now, in every state, at every width — the double
+# `═` "active" rail was removed (2026-09-19, follow-up): user watched the live card and asked
+# for it gone entirely. Busy is signalled ONLY by the glyph in the role/id text (✻ calm /
+# ✦✶✷✸✹✺ busy), never by the frame.
 RAIL_INACTIVE = "─"
 
 GLYPH_CALM = "✻"
@@ -77,14 +80,15 @@ BRANCH_GLYPH = "↱"     # U+21B1 — NOT ⎇, it breaks in the font stack in us
 
 # --------------------------------------------------------------------------
 # Colors (24-bit ANSI). Only ever applied when color is enabled; every
-# structural decision (rail single/double, corner glyph) must remain legible
-# with color off, per the NO_COLOR requirement.
+# structural decision (corner glyph, single rail) must remain legible with
+# color off, per the NO_COLOR requirement.
 # --------------------------------------------------------------------------
 
 RGB_ACTIVE = (217, 119, 87)     # terracotta — kept for possible future TEXT-only accent use,
 # but no longer used to color the border/rails (removed 2026-09-19 — user watched the live
 # preview and asked for a single uniform muted frame colour everywhere; the double `═` rail
-# stays as the (colourless) activity signal, see rail_char()/separator() below).
+# that used to be the colourless activity signal is ALSO gone now, 2026-09-19 follow-up — see
+# plain_border()/separator() below. Busy is signalled only by the glyph in the text.)
 # muted — inactive contour, and now the ONLY border/rail colour, active or not. Was
 # (58, 69, 92): near-invisible on a black terminal background (WCAG contrast ratio ≈2.2:1 vs
 # black — below the 3:1 floor usually used for UI-element visibility). Bumped ×1.5 on all three
@@ -123,12 +127,12 @@ DEFAULT_LAYOUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "
 
 DEFAULT_LAYOUT_ORDER = ["role", "id", "engine", "place"]
 DEFAULT_LAYOUT_SEGMENTS: Dict[str, dict] = {
-    "role":   {"tokens": ["role"], "narrow_tokens": None, "active": "never", "narrow_layout": "inline"},
+    "role":   {"tokens": ["role"], "narrow_tokens": None, "narrow_layout": "inline"},
     "id":     {"tokens": ["id", "ctx", "rl5", "eta5", "rl7", "eta7"], "narrow_tokens": ["id", "ctx"],
-               "active": "never", "narrow_layout": "inline"},
+               "narrow_layout": "inline"},
     "engine": {"tokens": ["model", "effort", "pr", "agents", "wf", "coord"], "narrow_tokens": None,
-               "active": "busy", "narrow_layout": "inline"},
-    "place":  {"tokens": ["dir", "branch", "path"], "narrow_tokens": None, "active": "never",
+               "narrow_layout": "inline"},
+    "place":  {"tokens": ["dir", "branch", "path"], "narrow_tokens": None,
                "narrow_layout": "split"},
 }
 
@@ -158,7 +162,7 @@ def load_layout(path: Optional[str] = None) -> Tuple[List[str], Dict[str, dict]]
         m = re.match(r"^\[(\w+)\]$", line)
         if m:
             cur = m.group(1)
-            segments[cur] = {"tokens": [], "narrow_tokens": None, "active": "never", "narrow_layout": "inline"}
+            segments[cur] = {"tokens": [], "narrow_tokens": None, "narrow_layout": "inline"}
             continue
         if cur is None:
             continue  # directive before any [segment] header — ignore
@@ -170,10 +174,6 @@ def load_layout(path: Optional[str] = None) -> Tuple[List[str], Dict[str, dict]]
         if m:
             segments[cur]["narrow_tokens"] = m.group(1).split()
             continue
-        m = re.match(r"^active:\s*(\S+)$", line)
-        if m:
-            segments[cur]["active"] = m.group(1)
-            continue
         m = re.match(r"^narrow_layout:\s*(\S+)$", line)
         if m:
             segments[cur]["narrow_layout"] = m.group(1)
@@ -184,7 +184,7 @@ def load_layout(path: Optional[str] = None) -> Tuple[List[str], Dict[str, dict]]
         return list(DEFAULT_LAYOUT_ORDER), {k: dict(v) for k, v in DEFAULT_LAYOUT_SEGMENTS.items()}
     # fill in any segment named in `order:` but missing its own [block] with safe defaults
     for name in order:
-        segments.setdefault(name, {"tokens": [], "narrow_tokens": None, "active": "never", "narrow_layout": "inline"})
+        segments.setdefault(name, {"tokens": [], "narrow_tokens": None, "narrow_layout": "inline"})
     return order, segments
 
 
@@ -217,14 +217,9 @@ class Scene:
     place: List[PlaceEntry] = field(default_factory=list)
     width: int = 80                # canonical width for the standalone demo print
     cut: str = "round"             # "round" | "none" — canonical cut level for the demo print
-    highlight: Optional[bool] = None  # rail double/single override; defaults to `busy` when None.
-    # Kept as a separate knob from `busy` for exactly one reason: the byte-exact
-    # reference frame (state 2) shows the busy glyph and movement-token content
-    # with SINGLE rails (no highlight) — that is the literally approved text.
-    # The rail-highlight mechanic itself (double rail when something is truly
-    # running) is demonstrated instead by state 3, which is not byte-pinned to
-    # any external text. Per the task: "якщо сумніваєшся — пріоритет за
-    # структурою еталона, підсвітка вторинна."
+    # NOTE: there used to be a `highlight` field here that overrode a double/single rail per
+    # scene. Removed (2026-09-19, follow-up) along with the whole double-rail mechanic — the
+    # frame is always single-rail now, so no scene needs to override anything about it.
 
 
 SESSION_ID = "093797da"
@@ -263,10 +258,10 @@ PLACE_MULTI = [
 
 SCENES: List[Scene] = [
     Scene("Стан 1 — спокій", ROLE_ORCH, False, place=PLACE_SINGLE, width=80, cut="round"),
-    Scene("Стан 2 — біжать агенти + координаційна пошта (еталонний кадр, без підсвітки рейок)",
+    Scene("Стан 2 — біжать агенти + координаційна пошта (еталонний кадр)",
           ROLE_ORCH, True, agents="⠹ agents ×1", coord="⇅ coord",
-          place=PLACE_SINGLE, width=80, cut="round", highlight=False),
-    Scene("Стан 3 — воркфлоу (з підсвіткою рейок)", ROLE_ORCH, True, wf="⚙ wf ×1",
+          place=PLACE_SINGLE, width=80, cut="round"),
+    Scene("Стан 3 — воркфлоу", ROLE_ORCH, True, wf="⚙ wf ×1",
           place=PLACE_SINGLE, width=80, cut="round"),
     Scene("Стан 4 — кілька тек", ROLE_ORCH, False, place=PLACE_MULTI, width=80, cut="round"),
     Scene("Стан 5 — роль на 160+ символів", ROLE_EXAMPLECLIENT_RAW, False,
@@ -284,6 +279,17 @@ ROLE_LIMIT = 160        # "Роль обрізається на 160 символ
 # Text helpers
 # --------------------------------------------------------------------------
 
+INSET = 1  # one cell of blank padding between the vertical bar and the content, each side.
+
+
+def content_budget(width: int) -> int:
+    """Max text length available inside the two vertical bars, AFTER taking out
+    the one-cell inset on both sides (see content_row()). Every wrap/truncate
+    budget in this file is derived from this one number so the inset can't
+    drift out of sync between role/id/engine/place."""
+    return max(0, (width - 2) - 2 * INSET)
+
+
 def truncate_role(text: str, limit: int = ROLE_LIMIT) -> str:
     """Rule: 'Роль обрізається на 160 символів.'"""
     if len(text) > limit:
@@ -297,12 +303,12 @@ def wrap_role(role_text: str, width: int, glyph: str) -> List[str]:
     into the first line ("<glyph> <text>") and a same-width 2-space indent
     baked into every continuation line ("  <text>") — glyph+space and the
     2-space indent are both exactly 2 cells wide, so one wrap budget serves
-    both: budget = (width - 2) - 2, where (width - 2) is the max content
-    length content_row() can hold (VBAR + content + VBAR — content_row no
-    longer reserves a leading space of its own, see content_row()).
+    both: budget = CONTENT_BUDGET(width) - 2, where CONTENT_BUDGET(width) is
+    the max text length content_row() can hold once its own one-cell inset on
+    each side is taken out (see content_row()).
     """
     text = truncate_role(role_text)
-    budget = max(1, (width - 2) - 2)
+    budget = max(1, content_budget(width) - 2)
     tw = textwrap.TextWrapper(
         width=budget,
         break_long_words=False,
@@ -322,7 +328,7 @@ def wrap_tokens(parts, width):
     segment degrades gracefully at narrow widths instead of being cut off
     mid-token by content_row's hard ellipsis truncation.
     """
-    budget = max(1, width - 2)
+    budget = max(1, content_budget(width))
     lines = []
     cur = ""
     for p in parts:
@@ -364,45 +370,42 @@ def truncate_path(path: str, budget: int) -> str:
 # Row builders
 # --------------------------------------------------------------------------
 
-def rail_char(active: bool) -> str:
-    # "Другий канал сигналу поза кольором: активна рейка — подвійна ═,
-    #  неактивна — одинарна ─. Має працювати при NO_COLOR=1."
-    return RAIL_ACTIVE if active else RAIL_INACTIVE
-
-
-def plain_border(width: int, left: str, right: str, active: bool, color: bool) -> str:
-    """Top/bottom border — a plain rail, corner to corner. No id, no glyph:
-    those live inside the role/id content segments now, not in the frame."""
-    r = rail_char(active)
+def plain_border(width: int, left: str, right: str, color: bool) -> str:
+    """Top/bottom border — a plain, ALWAYS-single rail, corner to corner. No id, no glyph:
+    those live inside the role/id content segments now, not in the frame. There is no more
+    "active" variant (removed 2026-09-19, follow-up) — the border never changes shape."""
     # Uniform frame colour (2026-09-19): the border/rails are ALWAYS RGB_INACTIVE now, active
     # or not — the terracotta highlight was removed from the frame entirely (user watched the
-    # live preview and didn't want a colour change here; the double `═` rail below is still the
-    # activity signal, just colourless now, same as the NO_COLOR contract already required).
+    # live preview and didn't want a colour change here). The double `═` rail that used to be
+    # the colourless activity signal is ALSO gone now (2026-09-19, follow-up) — busy is
+    # signalled only by the glyph in the role/id text, never by the frame.
     rgb = RGB_INACTIVE
-    fill = r * (width - 2)
+    fill = RAIL_INACTIVE * (width - 2)
     line = left + colorize(fill, rgb, enabled=color) + right
     plain_len = 1 + len(fill) + 1
     assert plain_len == width, f"border width mismatch: {plain_len} != {width}"
     return line
 
 
-def separator(width: int, active: bool, color: bool) -> str:
-    r = rail_char(active)
+def separator(width: int, color: bool) -> str:
     rgb = RGB_INACTIVE  # uniform frame colour — see plain_border() above
-    fill = r * (width - 2)
+    fill = RAIL_INACTIVE * (width - 2)
     return SEP_L + colorize(fill, rgb, enabled=color) + SEP_R
 
 
 def content_row(width: int, text: str, color: bool, rgb=None, bold: bool = False) -> str:
-    body_width = width - 2
-    # No leading space of our own (removed 2026-09-19): the space between "│" and the text
-    # was OUR inset, on top of whatever indentation Claude Code's own status-line chrome
-    # already adds outside this script's output. The glyph/word-wrap callers that want a
-    # visual gap (wrap_role's "<glyph> <text>") already bake it into `text` themselves.
+    # One-cell inset on BOTH sides (restored 2026-09-19, follow-up): a prior edit removed the
+    # leading space entirely, which read as "no padding at all" once seen live — user asked for
+    # exactly one blank cell between the bar and the text, symmetric left/right. This does NOT
+    # grow the card: body_width (and therefore the outer `width`) is unchanged, the padding eats
+    # into the space available for TEXT instead — see content_budget(), which every wrap/
+    # truncate budget in this file is derived from so they can't drift out of sync with this.
+    text_budget = content_budget(width)
     inner = text
-    if len(inner) > body_width:
-        inner = inner[: body_width - 1] + "…"
-    inner = inner.ljust(body_width)
+    if len(inner) > text_budget:
+        inner = (inner[: text_budget - 1] + "…") if text_budget > 0 else ""
+    inner = inner.ljust(text_budget)
+    inner = (" " * INSET) + inner + (" " * INSET)
     rendered = colorize(inner, rgb, bold=bold, enabled=color) if rgb else inner
     line = VBAR + rendered + VBAR
     plain_len = 1 + len(inner) + 1
@@ -463,7 +466,7 @@ def token_value_place_lead(tok: str, entry: PlaceEntry) -> str:
 def build_place_lines(entries: List[PlaceEntry], width: int, narrow: bool,
                        tokens: List[str], narrow_layout: str) -> List[str]:
     lines: List[str] = []
-    budget_total = width - 2  # VBAR + VBAR only — content_row no longer reserves a leading space
+    budget_total = content_budget(width)  # text space inside the bars, after the 1-cell inset
     has_path = "path" in tokens
     lead_tokens = [t for t in tokens if t != "path"]
     for entry in entries:
@@ -510,14 +513,6 @@ def build_segment_lines(seg_name: str, seg_cfg: dict, width: int, narrow: bool,
     return []
 
 
-def segment_active(seg_name: str, seg_cfg: dict, scene: Scene) -> bool:
-    if seg_cfg.get("active") != "busy":
-        return False
-    if seg_name == "engine" and scene.highlight is not None:
-        return scene.highlight
-    return scene.busy
-
-
 # --------------------------------------------------------------------------
 # Card assembly
 # --------------------------------------------------------------------------
@@ -533,21 +528,17 @@ def build_card(scene: Scene, width: int, cut: str, color: bool = False,
     narrow = width < NARROW_THRESHOLD
     glyph = GLYPH_BUSY_DEMO if scene.busy else GLYPH_CALM
 
-    # Four segments, always, in the configured order. A separator lights up
-    # (double rail) if either segment it sits between is active — so only
-    # the rails bordering an "active"-configured segment can ever go double;
-    # everything else (including the outer top/bottom borders) stays single.
-    blocks: List[Tuple[List[str], bool, str]] = []
+    # Four segments, always, in the configured order. The frame is always single-rail now — no
+    # segment or separator can ever go double (that mechanic was removed 2026-09-19, follow-up).
+    blocks: List[Tuple[List[str], str]] = []
     for seg_name in order:
-        seg_cfg = segments.get(seg_name, {"tokens": [], "narrow_tokens": None,
-                                           "active": "never", "narrow_layout": "inline"})
+        seg_cfg = segments.get(seg_name, {"tokens": [], "narrow_tokens": None, "narrow_layout": "inline"})
         lines = build_segment_lines(seg_name, seg_cfg, width, narrow, scene, glyph)
-        active = segment_active(seg_name, seg_cfg, scene)
-        blocks.append((lines, active, seg_name))
+        blocks.append((lines, seg_name))
 
     rows: List[str] = []
-    rows.append(plain_border(width, tl, tr, False, color))
-    for idx, (lines, active, kind) in enumerate(blocks):
+    rows.append(plain_border(width, tl, tr, color))
+    for idx, (lines, kind) in enumerate(blocks):
         for ln in lines:
             if kind == "role":
                 rows.append(content_row(width, ln, color, rgb=RGB_ROLE_TEXT, bold=True))
@@ -557,9 +548,8 @@ def build_card(scene: Scene, width: int, cut: str, color: bool = False,
             else:
                 rows.append(content_row(width, ln, color, rgb=RGB_COUNTER))
         if idx < len(blocks) - 1:
-            next_active = blocks[idx + 1][1]
-            rows.append(separator(width, active or next_active, color))
-    rows.append(plain_border(width, bl, br, False, color))
+            rows.append(separator(width, color))
+    rows.append(plain_border(width, bl, br, color))
     return rows
 
 

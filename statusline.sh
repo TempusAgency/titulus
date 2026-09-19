@@ -5,18 +5,18 @@
 # the reference renderer `design/render.py` / `design/REFERENCE.md` (do not edit those — they are
 # the spec + contract test). Top->bottom:
 #   ╭──────────────────────────────────────────────────────────╮   top border: plain rail, no id/glyph
-#   │ <glyph> <role text, wrapped, hang-indented>               │   role
-#   ├──────────────────────────────────────────────────────────┤   separator (single — never borders engine)
-#   │ <glyph> <id>  ◷ CTX N%  ◴ 5h N%  ↺ eta  ◴ 7d N%  ↺ eta    │   id + counters
-#   ├──────────────────────────────────────────────────────────┤   double rail if engine is active
+#   │ <glyph> <role text, wrapped, hang-indented>                │   role
+#   ├──────────────────────────────────────────────────────────┤   separator (always single)
+#   │ <glyph> <id>  ◷ CTX N%  ◴ 5h N%  ↺ eta  ◴ 7d N%  ↺ eta     │   id + counters
+#   ├──────────────────────────────────────────────────────────┤   separator (always single)
 #   │ ◆ model  ↯ effort  [⇄ PR #N]  [⠹ agents ×N] [⚙ wf ×N] [⇅ coord] │  engine + movement, one segment
-#   ├──────────────────────────────────────────────────────────┤   double rail if engine is active
-#   │ ⌂ dir  ↱ branch  ↳ path  (one row per working dir)        │   place
+#   ├──────────────────────────────────────────────────────────┤   separator (always single)
+#   │ ⌂ dir  ↱ branch  ↳ path  (one row per working dir)         │   place
 #   ╰──────────────────────────────────────────────────────────╯
-# Rails: single ─ = inactive, double ═ = active (2nd signal channel besides colour). Only the two
-# rails bordering the engine segment can ever go double; the role|id rail and the outer top/bottom
-# borders are always single. "Active" = `.working` marker OR live agents/wf (coord mail shows the
-# segment but never lights it up).
+# One cell of blank inset between "│" and the content, both sides, always (see 2026-09-19
+# follow-up note below). Rails: ALWAYS single ─ — every border and every separator, in every
+# state, at every width. There is no "active"/double-rail concept any more (removed 2026-09-19,
+# follow-up — see below); busy is signalled ONLY by the glyph in the role/id text.
 # Corners: TL/BR use the TempusGlyphs PUA glyphs (font: ~/Library/Fonts/TempusGlyphs-Regular.ttf,
 # U+E87E / U+E881); TR/BL are always the plain ┐ / └. Branch glyph is ↱ (U+21B1), NOT ⎇ — the
 # latter is missing from the font stack in use and renders broken.
@@ -68,7 +68,27 @@
 #      everywhere, active or not — the old terracotta highlight on the rails was removed
 #      (owner's call, after watching the live card: at narrow width the engine segment wraps to
 #      2 lines, so a coloured double rail above AND below it read as "two orange stripes"). The
-#      double `═` rail is still the (colourless) activity signal.
+#      double `═` rail was, AT THE TIME, still the (colourless) activity signal — see the next
+#      note, it is gone too now.
+#
+# FOLLOW-UP FIX (2026-09-19, same day, live card seen again): two point fixes, both requested
+# after watching the card render for real in Claude Code:
+#   1. INSET RESTORED: point 2 above ("no leading space") read, once actually seen, as "zero
+#      padding — text glued to the border", which looked bad. Put back exactly ONE cell of
+#      blank inset between "│" and the content, symmetric left AND right this time (the old,
+#      pre-2026-09-19 version only had a left inset). This does NOT grow $W / the card's outer
+#      width — the inset eats into the TEXT budget instead, so wrap_role/wrap_tokens/
+#      build_place_lines all shrink their budgets by 2 (1 per side) to match. Still zero new
+#      forks: the change is entirely inside content_row() and the budget math around it, in the
+#      same single perl pass.
+#   2. DOUBLE RAIL REMOVED: the `═` "active" rail (point 3 above) was rejected outright once
+#      seen live — "знову з'явились лінії з двома розділювачами". The frame is now ALWAYS
+#      single-rail `─`, in every state, at every width — no exceptions, no "active" concept for
+#      the border at all any more. Busy is signalled ONLY by the glyph in the role/id text
+#      (✻ calm / ✦✶✷✸✹✺ busy). The `active:` directive is gone from design/layout.conf; the
+#      $active tracking / rail_char($active) branch is gone from the perl render_text() below.
+# See design/REFERENCE.md's matching 2026-09-19 note for the exact byte-level effect on every
+# reference frame, and design/render.py for the identical change ported to the design renderer.
 set -uo pipefail
 
 cache_dir="${TMPDIR:-/tmp}/wave-chat-title"   # ephemeral AI cache (macOS wipes TMPDIR)
@@ -391,7 +411,7 @@ for dd in ${dirs[@]+"${dirs[@]}"}; do
 done
 
 # ONE perl pass for ALL char-aware (Cyrillic) work AND the entire box frame: role word-wrap, path
-# truncation, borders/separators/content-row padding, rails (single/double), colouring, AND (since
+# truncation, borders/separators/content-row padding (always single-rail), colouring, AND (since
 # 2026-09-19) parsing `design/layout.conf` to decide segment order + which tokens each segment
 # shows. Nothing outside this call touches character widths, and nothing outside it opens the
 # layout file. Emits the finished card (with embedded newlines) on stdout — a single command
@@ -412,8 +432,9 @@ render_text() {
     # 2026-09-19: border/rail is now ONE colour everywhere, active or not — the terracotta
     # highlight was removed (owner watched the live card: at narrow width the engine segment
     # wraps to 2 lines, so a coloured double-rail top+bottom read as "two orange stripes").
-    # The double `═` rail is still the activity signal, just colourless now. $ACTIVE is kept
-    # defined (unused by the frame) in case a future TEXT-only accent wants it.
+    # The double `═` rail that used to be the (colourless) activity signal is ALSO gone now
+    # (2026-09-19, follow-up) — busy is signalled only by the glyph in the text. $ACTIVE is
+    # kept defined (unused by the frame) in case a future TEXT-only accent wants it.
     my $ACTIVE="${E}[38;2;217;119;87m";    # terracotta — reserved, no longer used for the frame
     # inactive border/rail — and now the ONLY frame colour. Was 58;69;92: contrast ≈2.2:1 on
     # black (below the ~3:1 floor for UI-element visibility) — near-invisible. Brightened ×1.5
@@ -426,34 +447,43 @@ render_text() {
 
     my $NARROW_THRESHOLD = 60;
     my $narrow = $W < $NARROW_THRESHOLD;
+    my $INSET = 1;   # one blank cell between "│" and the content, each side — see content_row()
 
-    sub rail_char { my ($a)=@_; return $a ? "═" : "─"; }
+    # Max TEXT length available inside the two vertical bars, after taking out the inset on
+    # both sides. Every wrap/truncate budget below is derived from this ONE number so the
+    # inset does not drift out of sync between role/id/engine/place (mirrors content_budget()
+    # in design/render.py).
+    sub content_budget { my ($width)=@_; my $b=($width-2)-2*$INSET; return $b>0 ? $b : 0; }
+
     sub colorize  { my ($t,$rgb,$bold)=@_; return (($bold?$BOLD:"").$rgb.$t.$RESET); }
 
-    # Top/bottom border — a PLAIN rail, corner to corner. No id, no glyph:
-    # those live inside the role/id content segments now, not in the frame.
-    # Always single/inactive — the outer borders never border the engine
-    # segment, so they never take part in the highlight.
+    # Top/bottom border — a PLAIN, ALWAYS-single rail, corner to corner. No id, no glyph: those
+    # live inside the role/id content segments now, not in the frame. There is no more
+    # "active"/double-rail variant (removed 2026-09-19, follow-up) — the border never changes.
     sub plain_border {
       my ($width,$left,$right)=@_;
       my $rgb=$INACTIVE;
       return $left.colorize("─" x ($width-2),$rgb,0).$right;
     }
     sub separator {
-      my ($width,$active)=@_;
-      my $r=rail_char($active); my $rgb=$INACTIVE;   # uniform frame colour — see $INACTIVE above
-      return $SEPL.colorize($r x ($width-2),$rgb,0).$SEPR;
+      my ($width)=@_;
+      my $rgb=$INACTIVE;   # uniform frame colour — see $INACTIVE above
+      return $SEPL.colorize("─" x ($width-2),$rgb,0).$SEPR;
     }
     sub content_row {
       my ($width,$text,$rgb,$bold)=@_;
-      my $body = $width-2;
-      # No leading space of our own (removed 2026-09-19): that space between "│" and the text
-      # was OUR inset, stacked on top of whatever margin the Claude Code status-line chrome
-      # already adds outside this script output. Callers that want a visual gap (wrap_role
-      # builds "<glyph> <text>") bake it into $text themselves.
+      # One-cell inset on BOTH sides (restored 2026-09-19, follow-up): a same-day earlier edit
+      # had removed the leading space entirely, which read as "no padding at all" once seen
+      # live. This does NOT grow the card: $width (and body=$width-2) is unchanged, the inset
+      # eats into the TEXT budget instead — see content_budget() above, which every wrap/
+      # truncate budget in this file is derived from.
+      my $text_budget = content_budget($width);
       my $inner = $text;
-      if (length($inner) > $body) { $inner = substr($inner,0,$body-1)."…"; }
-      $inner .= (" " x ($body-length($inner))) if length($inner) < $body;
+      if (length($inner) > $text_budget) {
+        $inner = $text_budget>0 ? substr($inner,0,$text_budget-1)."…" : "";
+      }
+      $inner .= (" " x ($text_budget-length($inner))) if length($inner) < $text_budget;
+      $inner = (" " x $INSET).$inner.(" " x $INSET);
       my $rendered = $rgb ? colorize($inner,$rgb,$bold) : $inner;
       return $VBAR.$rendered.$VBAR;
     }
@@ -476,12 +506,12 @@ render_text() {
     # Word-wrap the role text, glyph baked into the first line ("<glyph>
     # <text>"), a same-width 2-space indent baked into continuation lines
     # ("  <text>") — both are 2 cells wide, so one wrap budget serves both:
-    # budget = (width-2) - 2, where (width-2) is the max content length
-    # content_row() can hold (VBAR+content+VBAR — no reserved leading space
-    # any more, see content_row() above).
+    # budget = content_budget(width) - 2, where content_budget(width) is the
+    # max TEXT length content_row() can hold once its own one-cell inset on
+    # each side is taken out (see content_budget() above).
     sub wrap_role {
       my ($text,$width,$glyph)=@_;
-      my $budget = ($width-2)-2; $budget=1 if $budget<1;
+      my $budget = content_budget($width)-2; $budget=1 if $budget<1;
       my @words = split /\s+/, $text;
       my @lines; my $cur="";
       for my $w (@words) {
@@ -504,7 +534,7 @@ render_text() {
     # being cut off mid-token by content_row own hard ellipsis truncation.
     sub wrap_tokens {
       my ($parts,$width)=@_;
-      my $budget = $width-2; $budget=1 if $budget<1;
+      my $budget = content_budget($width); $budget=1 if $budget<1;
       my @lines; my $cur="";
       for my $p (@$parts) {
         next if $p eq "";
@@ -521,7 +551,7 @@ render_text() {
     # is "split" (path gets its own line at narrow width) or "inline".
     sub build_place_lines {
       my ($entries,$width,$narrow,$tokorder,$nlayout)=@_;
-      my $budget_total = $width-2;
+      my $budget_total = content_budget($width);
       my @lead_toks = grep { $_ ne "path" } @$tokorder;
       my $has_path  = grep { $_ eq "path" } @$tokorder;
       my @lines;
@@ -576,14 +606,17 @@ render_text() {
         if ($line =~ /^order:\s*(.+)$/) { @order = split /\s+/, $1; next; }
         if ($line =~ /^\[(\w+)\]$/) {
           $cur = $1;
-          $seg{$cur} = { tokens=>[], narrow_tokens=>undef, active=>"never", narrow_layout=>"inline" };
+          $seg{$cur} = { tokens=>[], narrow_tokens=>undef, narrow_layout=>"inline" };
           next;
         }
         next unless defined $cur;
         if ($line =~ /^tokens:\s*(.*)$/)        { $seg{$cur}{tokens} = [split /\s+/, $1]; next; }
         if ($line =~ /^narrow_tokens:\s*(.*)$/)  { $seg{$cur}{narrow_tokens} = [split /\s+/, $1]; next; }
-        if ($line =~ /^active:\s*(\S+)$/)        { $seg{$cur}{active} = $1; next; }
         if ($line =~ /^narrow_layout:\s*(\S+)$/) { $seg{$cur}{narrow_layout} = $1; next; }
+        # `active:` used to be recognised here (double-rail highlight toggle) — removed
+        # 2026-09-19, follow-up, along with the whole double-rail mechanic. An old layout.conf
+        # that still has it is fine: unrecognised directives are silently ignored (see the
+        # comment below the loop in design/layout.conf).
       }
       close $lf;
     }
@@ -592,17 +625,17 @@ render_text() {
       # missing/unreadable layout.conf never breaks the card.
       @order = qw(role id engine place);
       %seg = (
-        role   => { tokens=>["role"], narrow_tokens=>undef, active=>"never", narrow_layout=>"inline" },
+        role   => { tokens=>["role"], narrow_tokens=>undef, narrow_layout=>"inline" },
         id     => { tokens=>[qw(id ctx rl5 eta5 rl7 eta7)], narrow_tokens=>[qw(id ctx)],
-                    active=>"never", narrow_layout=>"inline" },
+                    narrow_layout=>"inline" },
         engine => { tokens=>[qw(model effort pr agents wf coord)], narrow_tokens=>undef,
-                    active=>"busy", narrow_layout=>"inline" },
+                    narrow_layout=>"inline" },
         place  => { tokens=>[qw(dir branch path)], narrow_tokens=>undef,
-                    active=>"never", narrow_layout=>"split" },
+                    narrow_layout=>"split" },
       );
     }
     for my $name (@order) {
-      $seg{$name} //= { tokens=>[], narrow_tokens=>undef, active=>"never", narrow_layout=>"inline" };
+      $seg{$name} //= { tokens=>[], narrow_tokens=>undef, narrow_layout=>"inline" };
     }
 
     # token value catalogue — id/engine segments. Empty string = "nothing to show", dropped by
@@ -651,14 +684,13 @@ render_text() {
       } else {
         @lines = ();
       }
-      my $active = ($cfg->{active} eq "busy") ? $busy : 0;
-      push @blocks, [\@lines, $active, $name];
+      push @blocks, [\@lines, $name];
     }
 
     my @rows;
     push @rows, plain_border($W, $TL, $TR);
     for my $bi (0..$#blocks) {
-      my ($lines,$active,$kind) = @{$blocks[$bi]};
+      my ($lines,$kind) = @{$blocks[$bi]};
       for my $ln (@$lines) {
         if    ($kind eq "role")  { push @rows, content_row($W, $ln, $WHITE, 1); }
         elsif ($kind eq "place") {
@@ -666,9 +698,11 @@ render_text() {
           push @rows, content_row($W, $ln, $rgb, 0);
         } else { push @rows, content_row($W, $ln, $GREY, 0); }
       }
+      # Separator is ALWAYS single (no "active"/double-rail variant any more, removed
+      # 2026-09-19, follow-up) — $busy is still computed above (drives the glyph), it just no
+      # longer feeds the frame here.
       if ($bi < $#blocks) {
-        my $next_active = $blocks[$bi+1][1];
-        push @rows, separator($W, $active || $next_active);
+        push @rows, separator($W);
       }
     }
     push @rows, plain_border($W, $BL, $BR);
