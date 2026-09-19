@@ -40,10 +40,15 @@
 # screen going blank-then-redrawn. That's what a full `clear` does and is the actual source of
 # visible flicker; this avoids it.
 #
-# The poll tick doubles as the keyboard read: `read -t INTERVAL -n1` either returns a keypress
-# immediately or times out after INTERVAL seconds, so toggling the width mode reacts instantly
-# and a plain resize/edit is still picked up within one tick. Falls back to a plain `sleep` loop
-# (no key handling) when stdin isn't a terminal.
+# The poll tick is a plain `sleep INTERVAL` (external `sleep`, which — unlike bash's own `read
+# -t` — accepts a fractional second on macOS, so 0.3 works fine even under the system bash 3.2).
+# Right after each sleep, a non-blocking `read -t 0 -n1` peeks at stdin: `-t 0` is a documented
+# bash builtin since well before 3.2 — it never waits, it just reports whether a byte is already
+# sitting in the input buffer, so a keypress made during the sleep is picked up the instant the
+# tick ends. (Bash 3.2's `read -t` only accepts whole seconds for a REAL wait — `read -t 0.3`
+# throws "invalid timeout specification" — so all waiting is delegated to `sleep`, and `read` is
+# only ever used with `-t 0`, which needs no fractional support.) Falls back to a plain `sleep`
+# loop (no key handling) when stdin isn't a terminal.
 #
 # Usage:
 #   ./watch.sh                    # watch design/layout.sandbox.conf (default — safe, no effect
@@ -181,15 +186,19 @@ INTERACTIVE=0
 [ -t 0 ] && INTERACTIVE=1
 
 while true; do
+  # bash 3.2 (the system bash this actually runs under) rejects a fractional `read -t`, so the
+  # wait itself is the external `sleep` (fractional-second capable on macOS) and, right after it,
+  # a non-blocking `read -t 0` (an integer — always legal, even on 3.2) just peeks at whatever key
+  # landed in the input buffer during that sleep. Net effect on cadence/latency: identical to the
+  # old single blocking `read -t $INTERVAL` — a keypress is still caught within one tick.
+  sleep "$INTERVAL"
   if [ "$INTERACTIVE" = 1 ]; then
-    if read -t "$INTERVAL" -n 1 -s -r key; then
+    if read -t 0 -n 1 -s -r key; then
       case "$key" in
         c|C) MODE=$((1 - MODE)); draw; continue ;;
         q|Q) exit 0 ;;
       esac
     fi
-  else
-    sleep "$INTERVAL"
   fi
   cur_mtime="$(mtime "$LAYOUT")"
   cur_width="$(term_width)"
