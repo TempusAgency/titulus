@@ -50,6 +50,25 @@
 # config parsing — happens in the ONE perl pass (`render_text`), exactly as before the port. No
 # python, no extra forks were added for the new layout or for the config file. Before adding any
 # per-render command, remember it costs ×(live sessions).
+#
+# VISUAL-DEFECT FIX (2026-09-19, real Claude Code screenshot): every card line ended in CC's own
+# "…" (right border invisible) and the left margin looked oversized (left border unreadable).
+# Three independent causes, three fixes, all inside the existing single perl pass — no new forks:
+#   1. Width: $W was COLUMNS-1. Per CC's own docs, COLUMNS is the RAW terminal width, and CC's
+#      status-line chrome reserves ADDITIONAL columns of its own that COLUMNS does NOT reflect —
+#      so COLUMNS-1 was still too wide and CC truncated the overflow with "…". Now subtracted via
+#      $WMARGIN (default 3, safer but still a placeholder — see the width-test mode below for how
+#      to measure the exact number on real hardware and drop it in $user_dir/.width_margin).
+#   2. Left inset: content_row() used to add its OWN leading space between "│" and the content,
+#      on top of CC's un-removable built-in chrome margin. Removed — the card now starts flush
+#      against its own border; CC's own margin (undocumented size) is unchanged and out of our
+#      control. See design/REFERENCE.md's 2026-09-19 note for the byte-exact effect.
+#   3. Border colour: $INACTIVE (58;69;92) had ≈2.2:1 contrast on black — nearly invisible.
+#      Brightened ×1.5 (same hue ratio) to 87;104;138, ≈3.7:1. Also: the frame is now ONE colour
+#      everywhere, active or not — the old terracotta highlight on the rails was removed
+#      (owner's call, after watching the live card: at narrow width the engine segment wraps to
+#      2 lines, so a coloured double rail above AND below it read as "two orange stripes"). The
+#      double `═` rail is still the (colourless) activity signal.
 set -uo pipefail
 
 cache_dir="${TMPDIR:-/tmp}/wave-chat-title"   # ephemeral AI cache (macOS wipes TMPDIR)
@@ -175,16 +194,55 @@ cap=160
 #   3) manual .wrapwidth override → 4) 38.
 # This is the box's total outer width (border to border) — content_row/top_border/etc pad or
 # truncate every line to exactly this many cells.
+#
+# WIDTH MARGIN (2026-09-19 — fixes every line ending in CC-added "…"): $COLUMNS is the RAW
+# terminal width (CC docs: "Claude Code sets these to the current terminal dimensions" — the
+# full terminal, not the usable content area). Separately, CC's own status-line chrome reserves
+# some columns of its OWN that are NOT reflected in COLUMNS (docs: the `padding` setting "adds
+# extra horizontal spacing... IN ADDITION TO the interface's built-in spacing" — so an
+# undocumented built-in margin exists even at padding:0). Drawing a card exactly COLUMNS-1 cells
+# wide overflows that real usable width, so CC truncates our own last cell(s) and appends its
+# own "…" on every line — this is what was observed on the live card. Subtracting only 1 was
+# not enough. WMARGIN below is a SAFER default (not a measured value — do not treat 3 as final).
+# Get the exact number for real hardware via the width-test mode a few lines down (touch
+# $user_dir/.widthtest), then drop it in $user_dir/.width_margin — no code edit needed.
+margin_file="$user_dir/.width_margin"
+if [ -s "$margin_file" ]; then WMARGIN="$(<"$margin_file")"; else WMARGIN=3; fi
+case "$WMARGIN" in ''|*[!0-9]*) WMARGIN=3;; esac
+
 if [ -n "${COLUMNS:-}" ] && [ "$COLUMNS" -gt 0 ] 2>/dev/null; then
-  W=$(( COLUMNS > 1 ? COLUMNS - 1 : COLUMNS ))
+  W=$(( COLUMNS > WMARGIN ? COLUMNS - WMARGIN : 1 ))
 elif [ -n "${TMUX:-}" ] && _pw="$(tmux display-message -p '#{pane_width}' 2>/dev/null)" && [ "${_pw:-0}" -gt 0 ] 2>/dev/null; then
-  W=$(( _pw > 1 ? _pw - 1 : _pw ))
+  W=$(( _pw > WMARGIN ? _pw - WMARGIN : 1 ))
 elif [ -f "$cache_dir/.wrapwidth" ]; then
   W="$(<"$cache_dir/.wrapwidth")"
 else
   W=38
 fi
 case "$W" in ""|*[!0-9]*) W=38;; esac
+
+# WIDTH-TEST MODE (manual, opt-in, zero cost when off — one `[ -f ]` test, no fork): touch
+# $user_dir/.widthtest, trigger a re-render (send any message, or wait for refreshInterval),
+# read the card, then `rm` the flag file. Prints one ruler line per candidate width, each ending
+# in a "[END m=N]" tag where N = how many columns were subtracted from the RAW $COLUMNS for that
+# line. Find the LONGEST line whose "[END m=N]" tag is fully visible — i.e. NOT cut off with a
+# trailing "…". That line's N is the exact, measured value to put in $user_dir/.width_margin
+# (one integer, no quotes). If even m=8 still shows "…", the deficit is bigger — widen the
+# `delta` list below and re-test. Uses only bash builtins (printf, arithmetic, a for-loop) — no
+# subprocess, so it is safe to leave this block in the shipped script.
+if [ -f "$user_dir/.widthtest" ]; then
+  base="${COLUMNS:-$W}"
+  out=""
+  for delta in 0 1 2 3 4 5 6 7 8; do
+    len=$(( base - delta )); [ "$len" -lt 8 ] && continue
+    tag="[END m=${delta}]"; tlen=${#tag}
+    fillcount=$(( len - tlen )); [ "$fillcount" -lt 0 ] && fillcount=0
+    fill=""; _i=0; while [ "$_i" -lt "$fillcount" ]; do fill="${fill}-"; _i=$((_i+1)); done
+    out="${out}${fill}${tag}"$'\n'
+  done
+  printf '%s' "$out"
+  exit 0
+fi
 
 # layout config path — resolution chain, ZERO forks (pure bash builtins: parameter expansion +
 # `[ -f ]` tests). Two candidates, checked in order:
@@ -351,8 +409,16 @@ render_text() {
     my $WHITE ="${E}[38;2;245;246;250m";   # role text
     my $GREY  ="${E}[38;2;158;162;172m";   # id / engine text
     my $PATHC ="${E}[38;2;124;138;162m";   # place path
-    my $ACTIVE="${E}[38;2;217;119;87m";    # active border/rail — terracotta
-    my $INACTIVE="${E}[38;2;58;69;92m";    # inactive border/rail — muted
+    # 2026-09-19: border/rail is now ONE colour everywhere, active or not — the terracotta
+    # highlight was removed (owner watched the live card: at narrow width the engine segment
+    # wraps to 2 lines, so a coloured double-rail top+bottom read as "two orange stripes").
+    # The double `═` rail is still the activity signal, just colourless now. $ACTIVE is kept
+    # defined (unused by the frame) in case a future TEXT-only accent wants it.
+    my $ACTIVE="${E}[38;2;217;119;87m";    # terracotta — reserved, no longer used for the frame
+    # inactive border/rail — and now the ONLY frame colour. Was 58;69;92: contrast ≈2.2:1 on
+    # black (below the ~3:1 floor for UI-element visibility) — near-invisible. Brightened ×1.5
+    # on all channels (58,69,92→87,104,138), same hue ratio/"family", contrast ≈3.7:1.
+    my $INACTIVE="${E}[38;2;87;104;138m";  # frame colour, active or not
 
     my $TL = "\x{E87E}"; my $TR = "┐"; my $BL = "└"; my $BR = "\x{E881}";
     my $VBAR = "│"; my $SEPL = "├"; my $SEPR = "┤";
@@ -375,13 +441,17 @@ render_text() {
     }
     sub separator {
       my ($width,$active)=@_;
-      my $r=rail_char($active); my $rgb=$active?$ACTIVE:$INACTIVE;
+      my $r=rail_char($active); my $rgb=$INACTIVE;   # uniform frame colour — see $INACTIVE above
       return $SEPL.colorize($r x ($width-2),$rgb,0).$SEPR;
     }
     sub content_row {
       my ($width,$text,$rgb,$bold)=@_;
       my $body = $width-2;
-      my $inner = " ".$text;
+      # No leading space of our own (removed 2026-09-19): that space between "│" and the text
+      # was OUR inset, stacked on top of whatever margin the Claude Code status-line chrome
+      # already adds outside this script output. Callers that want a visual gap (wrap_role
+      # builds "<glyph> <text>") bake it into $text themselves.
+      my $inner = $text;
       if (length($inner) > $body) { $inner = substr($inner,0,$body-1)."…"; }
       $inner .= (" " x ($body-length($inner))) if length($inner) < $body;
       my $rendered = $rgb ? colorize($inner,$rgb,$bold) : $inner;
@@ -406,11 +476,12 @@ render_text() {
     # Word-wrap the role text, glyph baked into the first line ("<glyph>
     # <text>"), a same-width 2-space indent baked into continuation lines
     # ("  <text>") — both are 2 cells wide, so one wrap budget serves both:
-    # budget = (width-3) - 2, where (width-3) is the max content length
-    # content_row() can hold.
+    # budget = (width-2) - 2, where (width-2) is the max content length
+    # content_row() can hold (VBAR+content+VBAR — no reserved leading space
+    # any more, see content_row() above).
     sub wrap_role {
       my ($text,$width,$glyph)=@_;
-      my $budget = ($width-3)-2; $budget=1 if $budget<1;
+      my $budget = ($width-2)-2; $budget=1 if $budget<1;
       my @words = split /\s+/, $text;
       my @lines; my $cur="";
       for my $w (@words) {
@@ -433,7 +504,7 @@ render_text() {
     # being cut off mid-token by content_row own hard ellipsis truncation.
     sub wrap_tokens {
       my ($parts,$width)=@_;
-      my $budget = $width-3; $budget=1 if $budget<1;
+      my $budget = $width-2; $budget=1 if $budget<1;
       my @lines; my $cur="";
       for my $p (@$parts) {
         next if $p eq "";
@@ -450,7 +521,7 @@ render_text() {
     # is "split" (path gets its own line at narrow width) or "inline".
     sub build_place_lines {
       my ($entries,$width,$narrow,$tokorder,$nlayout)=@_;
-      my $budget_total = $width-3;
+      my $budget_total = $width-2;
       my @lead_toks = grep { $_ ne "path" } @$tokorder;
       my $has_path  = grep { $_ eq "path" } @$tokorder;
       my @lines;

@@ -81,8 +81,17 @@ BRANCH_GLYPH = "↱"     # U+21B1 — NOT ⎇, it breaks in the font stack in us
 # with color off, per the NO_COLOR requirement.
 # --------------------------------------------------------------------------
 
-RGB_ACTIVE = (217, 119, 87)     # terracotta — active contour
-RGB_INACTIVE = (58, 69, 92)     # muted — inactive contour
+RGB_ACTIVE = (217, 119, 87)     # terracotta — kept for possible future TEXT-only accent use,
+# but no longer used to color the border/rails (removed 2026-09-19 — user watched the live
+# preview and asked for a single uniform muted frame colour everywhere; the double `═` rail
+# stays as the (colourless) activity signal, see rail_char()/separator() below).
+# muted — inactive contour, and now the ONLY border/rail colour, active or not. Was
+# (58, 69, 92): near-invisible on a black terminal background (WCAG contrast ratio ≈2.2:1 vs
+# black — below the 3:1 floor usually used for UI-element visibility). Bumped ×1.5 on all three
+# channels (58,69,92 → 87,104,138) — SAME hue ratio, so it's still the same cool blue-grey
+# "family" as before, not a new colour, just brighter. That scale lands at contrast ≈3.7:1 vs
+# black: legible without competing with the white/grey text colours above it.
+RGB_INACTIVE = (87, 104, 138)   # muted — the frame's only colour (brightened + unified 2026-09-19)
 RGB_ROLE_TEXT = (245, 246, 250)  # bold
 RGB_COUNTER = (158, 162, 172)
 RGB_PATH = (124, 138, 162)
@@ -288,11 +297,12 @@ def wrap_role(role_text: str, width: int, glyph: str) -> List[str]:
     into the first line ("<glyph> <text>") and a same-width 2-space indent
     baked into every continuation line ("  <text>") — glyph+space and the
     2-space indent are both exactly 2 cells wide, so one wrap budget serves
-    both: budget = (width - 3) - 2, where (width - 3) is the max content
-    length content_row() can hold (VBAR + 1 leading space + content + VBAR).
+    both: budget = (width - 2) - 2, where (width - 2) is the max content
+    length content_row() can hold (VBAR + content + VBAR — content_row no
+    longer reserves a leading space of its own, see content_row()).
     """
     text = truncate_role(role_text)
-    budget = max(1, (width - 3) - 2)
+    budget = max(1, (width - 2) - 2)
     tw = textwrap.TextWrapper(
         width=budget,
         break_long_words=False,
@@ -312,7 +322,7 @@ def wrap_tokens(parts, width):
     segment degrades gracefully at narrow widths instead of being cut off
     mid-token by content_row's hard ellipsis truncation.
     """
-    budget = max(1, width - 3)
+    budget = max(1, width - 2)
     lines = []
     cur = ""
     for p in parts:
@@ -364,7 +374,11 @@ def plain_border(width: int, left: str, right: str, active: bool, color: bool) -
     """Top/bottom border — a plain rail, corner to corner. No id, no glyph:
     those live inside the role/id content segments now, not in the frame."""
     r = rail_char(active)
-    rgb = RGB_ACTIVE if active else RGB_INACTIVE
+    # Uniform frame colour (2026-09-19): the border/rails are ALWAYS RGB_INACTIVE now, active
+    # or not — the terracotta highlight was removed from the frame entirely (user watched the
+    # live preview and didn't want a colour change here; the double `═` rail below is still the
+    # activity signal, just colourless now, same as the NO_COLOR contract already required).
+    rgb = RGB_INACTIVE
     fill = r * (width - 2)
     line = left + colorize(fill, rgb, enabled=color) + right
     plain_len = 1 + len(fill) + 1
@@ -374,14 +388,18 @@ def plain_border(width: int, left: str, right: str, active: bool, color: bool) -
 
 def separator(width: int, active: bool, color: bool) -> str:
     r = rail_char(active)
-    rgb = RGB_ACTIVE if active else RGB_INACTIVE
+    rgb = RGB_INACTIVE  # uniform frame colour — see plain_border() above
     fill = r * (width - 2)
     return SEP_L + colorize(fill, rgb, enabled=color) + SEP_R
 
 
 def content_row(width: int, text: str, color: bool, rgb=None, bold: bool = False) -> str:
     body_width = width - 2
-    inner = " " + text
+    # No leading space of our own (removed 2026-09-19): the space between "│" and the text
+    # was OUR inset, on top of whatever indentation Claude Code's own status-line chrome
+    # already adds outside this script's output. The glyph/word-wrap callers that want a
+    # visual gap (wrap_role's "<glyph> <text>") already bake it into `text` themselves.
+    inner = text
     if len(inner) > body_width:
         inner = inner[: body_width - 1] + "…"
     inner = inner.ljust(body_width)
@@ -445,7 +463,7 @@ def token_value_place_lead(tok: str, entry: PlaceEntry) -> str:
 def build_place_lines(entries: List[PlaceEntry], width: int, narrow: bool,
                        tokens: List[str], narrow_layout: str) -> List[str]:
     lines: List[str] = []
-    budget_total = width - 3
+    budget_total = width - 2  # VBAR + VBAR only — content_row no longer reserves a leading space
     has_path = "path" in tokens
     lead_tokens = [t for t in tokens if t != "path"]
     for entry in entries:
