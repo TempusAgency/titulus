@@ -6,6 +6,6 @@
     "name": "Tempus.agency",
     "email": "office@tempus.agency"
   },
-  "homepage": "https://github.com/TempusAgency",
+  "homepage": "https://github.com/TempusAgency/titulus",
   "keywords": ["statusline", "status-card", "session-summary", "hooks", "wave-terminal"]
 }

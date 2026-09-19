@@ -49,12 +49,13 @@ else
 fi
 
 # merge: keep existing statusLine keys, default padding:0 + refreshInterval:300 if none, always set
-# our type+command. refreshInterval is in SECONDS (min 1). It is a GLOBAL setting → its cost is
-# multiplied by EVERY live session (~35-40 here), so the safe default is 300 (5 min). The card's
-# animation is event-driven (it re-renders on each tool call); the interval only governs IDLE
-# freshness of the reset countdown / working→idle transition, which doesn't need to be frequent.
-# History: refreshInterval=1 (2026-06-07) AND =5 (2026-06-08) BOTH pinned the CPU ×~35 sessions.
-# Per ~/.claude/CLAUDE.md the hard floor is now 30 (prefer 300); anything below needs Serg's approval.
+# our type+command. refreshInterval is in SECONDS (min 1). It is a GLOBAL setting in
+# ~/.claude/settings.json, so its cost multiplies by every concurrent Claude Code session on the
+# machine, not just this one. The card's animation is event-driven (it re-renders on each tool
+# call); the interval only governs IDLE freshness of the reset countdown / working→idle transition,
+# which doesn't need to be frequent. A low value (seen as low as 1-5s) has caused real CPU spikes
+# when several sessions are open at once — treat anything below 30 as needing a deliberate,
+# explicit reason, and prefer 300 (5 min).
 # A user-set value still wins (middle object overrides this default).
 jq --arg cmd "$STATUSLINE_STABLE" \
    '.statusLine = ({"padding":0,"refreshInterval":300} + (if (.statusLine|type)=="object" then .statusLine else {} end) + {"type":"command","command":$cmd})' \

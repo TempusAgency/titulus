@@ -7,3 +7,11 @@
 # OS / editor cruft.
 .DS_Store
 *.swp
+
+# Internal working docs — local-only, deliberately excluded from the public
+# repo (agency-internal methodology, coordination notes, prior client refs).
+# Kept on disk for local work; never tracked or published.
+/CLAUDE.md
+/docs/AUDIT-2026-06-03.md
+/docs/AUDIT-UNIVERSALITY-2026-06-03.md
+/docs/OPTIMIZATION-HANDOFF-2026-06-10.md
