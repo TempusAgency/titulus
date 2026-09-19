@@ -101,6 +101,47 @@ RGB_COUNTER = (158, 162, 172)
 RGB_PATH = (124, 138, 162)
 RGB_MUTED = (110, 114, 124)
 
+# Threshold colouring for the three id-segment percentage chips (ctx / rl5 / rl7) — 2026-09-19,
+# user request: "коли 40% робити яскравим, коли 50 жовтим, коли 60 помаранчевим, коли 80
+# червоним". Hardcoded on purpose — user explicitly rejected a layout.conf knob for this ("не
+# треба мені налаштування — зроби як я сказав і все"). Colours stay in the same cool/warm family
+# as the existing frame palette (RGB_INACTIVE 87;104;138, RGB_COUNTER 158;162;172, RGB_ACTIVE
+# 217;119;87) and stay legible (not neon) on a black background:
+#   <40%  — RGB_COUNTER    (unchanged — same muted grey every other chip already uses)
+#   >=40% — RGB_PCT_BRIGHT (same near-white as the role text, just not bold — "привертає увагу")
+#   >=50% — RGB_PCT_YELLOW (warm amber, muted enough to not read as alarming by itself)
+#   >=60% — RGB_ACTIVE     (the terracotta accent already reserved in the palette — reused here
+#                            instead of inventing a 5th colour)
+#   >=80% — RGB_PCT_RED    (soft red — clearly "stop and look" without being pure #ff0000)
+RGB_PCT_BRIGHT = (245, 246, 250)
+RGB_PCT_YELLOW = (216, 181, 86)
+RGB_PCT_ORANGE = RGB_ACTIVE
+RGB_PCT_RED = (219, 86, 86)
+
+
+def pct_color(pct: Optional[int]):
+    """Threshold colour for a ctx/rl5/rl7 percentage. `pct` is the plain integer value (0-100+)
+    or None when the metric has no value right now — mirrors token_value_id()'s "" = nothing to
+    show rule, just for colour instead of text."""
+    if pct is None:
+        return RGB_COUNTER
+    if pct >= 80:
+        return RGB_PCT_RED
+    if pct >= 60:
+        return RGB_PCT_ORANGE
+    if pct >= 50:
+        return RGB_PCT_YELLOW
+    if pct >= 40:
+        return RGB_PCT_BRIGHT
+    return RGB_COUNTER
+
+
+def parse_pct(s: str) -> Optional[int]:
+    """Pull the leading integer out of a percentage string like "41%" or "41". Returns None for
+    "" (no value) or anything unparsable — pct_color() then falls back to the muted colour."""
+    m = re.match(r"\s*(\d+)", s or "")
+    return int(m.group(1)) if m else None
+
 
 def _fg(rgb):
     r, g, b = rgb
@@ -437,6 +478,36 @@ def content_row(width: int, text: str, color: bool, rgb=None, bold: bool = False
     return line
 
 
+def content_row_spans(width: int, spans: List[Tuple[str, tuple]], color: bool) -> str:
+    """Like content_row(), but colours each (text, rgb) span in `spans` independently instead of
+    painting the whole row one colour. Used ONLY by the `id` segment, so the ctx/rl5/rl7
+    percentage chips can be threshold-coloured (see pct_color()) while the rest of the line
+    (glyph+session id, the "  " gaps between tokens) stays the usual muted RGB_COUNTER.
+
+    Width/truncation math is identical to content_row() — it operates on the PLAIN
+    (un-colourized) concatenation of the spans, so the two functions can never disagree about
+    how many visible characters fit. A cut landing inside a span (only possible on an
+    unrealistically narrow width — the id line is short) falls back to one flat colour for the
+    truncated text, same as content_row's own ellipsis rule, rather than trying to split a
+    colour boundary mid-escape-sequence.
+    """
+    text_budget = content_budget(width)
+    full = "".join(text for text, _ in spans)
+    if len(full) > text_budget:
+        inner = (full[: text_budget - 1] + "…") if text_budget > 0 else ""
+        inner = inner.ljust(text_budget)
+        rendered = colorize(inner, RGB_COUNTER, enabled=color)
+    else:
+        pieces = "".join(colorize(text, rgb, enabled=color) for text, rgb in spans)
+        rendered = pieces + (" " * (text_budget - len(full)))
+    rendered = (" " * INSET) + rendered + (" " * INSET)
+    bar = colorize(VBAR, RGB_INACTIVE, enabled=color)
+    line = bar + rendered + bar
+    plain_len = 1 + INSET + text_budget + INSET + 1
+    assert plain_len == width, f"content_row_spans width mismatch: {plain_len} != {width}"
+    return line
+
+
 # --------------------------------------------------------------------------
 # Token values — the token catalogue described in layout.conf's header.
 # Each function returns "" when the token has no value to show right now
@@ -517,6 +588,24 @@ def build_place_lines(entries: List[PlaceEntry], width: int, narrow: bool,
     return lines
 
 
+def build_id_spans(tokens: List[str], glyph: str) -> List[Tuple[str, tuple]]:
+    """(text, rgb) spans for the `id` segment content row — used by build_card() instead of
+    build_segment_lines()'s plain-text join, so ctx/rl5/rl7 can be threshold-coloured (see
+    pct_color()) while the rest of the line (glyph+session id, the "  " gaps between tokens)
+    stays the usual muted RGB_COUNTER, unchanged from before this feature existed."""
+    pct_by_tok = {"ctx": parse_pct(CTX), "rl5": parse_pct(P5H), "rl7": parse_pct(P7D)}
+    spans: List[Tuple[str, tuple]] = []
+    for t in tokens:
+        v = token_value_id(t, glyph)
+        if not v:
+            continue
+        if spans:
+            spans.append(("  ", RGB_COUNTER))
+        rgb = pct_color(pct_by_tok[t]) if t in pct_by_tok else RGB_COUNTER
+        spans.append((v, rgb))
+    return spans
+
+
 def build_segment_lines(seg_name: str, seg_cfg: dict, width: int, narrow: bool,
                          scene: Scene, glyph: str) -> List[str]:
     tokens = seg_cfg["tokens"]
@@ -554,23 +643,37 @@ def build_card(scene: Scene, width: int, cut: str, color: bool = False,
 
     # Four segments, always, in the configured order. The frame is always single-rail now — no
     # segment or separator can ever go double (that mechanic was removed 2026-09-19, follow-up).
-    blocks: List[Tuple[List[str], str]] = []
+    # `id` carries its own colour spans (ctx/rl5/rl7 threshold colouring, see build_id_spans())
+    # alongside the plain-text line — every other segment's `spans` stays None and renders
+    # through content_row() exactly as before.
+    blocks: List[Tuple[List[str], str, Optional[List[Tuple[str, tuple]]]]] = []
     for seg_name in order:
         seg_cfg = segments.get(seg_name, {"tokens": [], "narrow_tokens": None, "narrow_layout": "inline"})
-        lines = build_segment_lines(seg_name, seg_cfg, width, narrow, scene, glyph)
-        blocks.append((lines, seg_name))
+        spans = None
+        if seg_name == "id":
+            tokens = seg_cfg["tokens"]
+            if narrow and seg_cfg.get("narrow_tokens") is not None:
+                tokens = seg_cfg["narrow_tokens"]
+            spans = build_id_spans(tokens, glyph)
+            lines = ["".join(t for t, _ in spans)]
+        else:
+            lines = build_segment_lines(seg_name, seg_cfg, width, narrow, scene, glyph)
+        blocks.append((lines, seg_name, spans))
 
     rows: List[str] = []
     rows.append(plain_border(width, tl, tr, color))
-    for idx, (lines, kind) in enumerate(blocks):
-        for ln in lines:
-            if kind == "role":
-                rows.append(content_row(width, ln, color, rgb=RGB_ROLE_TEXT, bold=True))
-            elif kind == "place":
-                rgb = RGB_PATH if (ln.startswith("⌂") or ln.startswith("…")) else RGB_COUNTER
-                rows.append(content_row(width, ln, color, rgb=rgb))
-            else:
-                rows.append(content_row(width, ln, color, rgb=RGB_COUNTER))
+    for idx, (lines, kind, spans) in enumerate(blocks):
+        if kind == "id" and spans is not None:
+            rows.append(content_row_spans(width, spans, color))
+        else:
+            for ln in lines:
+                if kind == "role":
+                    rows.append(content_row(width, ln, color, rgb=RGB_ROLE_TEXT, bold=True))
+                elif kind == "place":
+                    rgb = RGB_PATH if (ln.startswith("⌂") or ln.startswith("…")) else RGB_COUNTER
+                    rows.append(content_row(width, ln, color, rgb=rgb))
+                else:
+                    rows.append(content_row(width, ln, color, rgb=RGB_COUNTER))
         if idx < len(blocks) - 1:
             rows.append(separator(width, color))
     rows.append(plain_border(width, bl, br, color))

@@ -441,6 +441,30 @@ render_text() {
     # on all channels (58,69,92→87,104,138), same hue ratio/"family", contrast ≈3.7:1.
     my $INACTIVE="${E}[38;2;87;104;138m";  # frame colour, active or not
 
+    # Threshold colouring for the three id-segment percentage chips (ctx / rl5 / rl7) —
+    # 2026-09-19, user request: "коли 40% робити яскравим, коли 50 жовтим, коли 60
+    # помаранчевим, коли 80 червоним". Hardcoded on purpose — user explicitly rejected a
+    # layout.conf knob for this ("не треба мені налаштування — зроби як я сказав і все").
+    # Colours stay in the same cool/warm family as the rest of the palette above ($INACTIVE
+    # 87;104;138, $GREY below, $ACTIVE 217;119;87) and stay legible (not neon) on black:
+    #   <40%  — $GREY   (unchanged — same muted grey every other id/engine chip already uses)
+    #   >=40% — $BRIGHT (same near-white as role text, unbold — "привертає увагу")
+    #   >=50% — $YELLOW (warm amber, muted enough to not read as alarming by itself)
+    #   >=60% — $ACTIVE (the terracotta accent already reserved above — reused, not a 5th colour)
+    #   >=80% — $RED    (soft red — "stop and look" without being pure #ff0000)
+    my $BRIGHT="${E}[38;2;245;246;250m";
+    my $YELLOW="${E}[38;2;216;181;86m";
+    my $RED   ="${E}[38;2;219;86;86m";
+    sub pct_color {
+      my ($pct)=@_;
+      return $GREY unless defined($pct) && $pct ne "" && $pct =~ /^\d+$/;
+      return $RED    if $pct >= 80;
+      return $ACTIVE if $pct >= 60;
+      return $YELLOW if $pct >= 50;
+      return $BRIGHT if $pct >= 40;
+      return $GREY;
+    }
+
     my $TL = "\x{E87E}"; my $TR = "┐"; my $BL = "└"; my $BR = "\x{E881}";
     my $VBAR = "│"; my $SEPL = "├"; my $SEPR = "┤";
     my $BRANCHG = "↱";
@@ -497,6 +521,33 @@ render_text() {
       my $rendered = $rgb ? colorize($inner,$rgb,$bold) : $inner;
       # The "│" bars are frame, not text: always $INACTIVE, regardless of $rgb/$bold used for
       # the text between them (see colour-fix note above plain_border()).
+      my $bar = colorize($VBAR,$INACTIVE,0);
+      return $bar.$rendered.$bar;
+    }
+
+    # content_row_multi: like content_row(), but colours each [text,rgb] span in $spans
+    # independently instead of painting the whole row one colour. Used ONLY for the `id`
+    # segment, so the ctx/rl5/rl7 percentage chips can be threshold-coloured (pct_color()) while
+    # the rest of the line (glyph+session id, the "  " gaps between tokens) stays the usual
+    # muted $GREY. Width/truncation math mirrors content_row() exactly, operating on the PLAIN
+    # concatenation of the spans so the two can never disagree on how many characters fit. A cut
+    # landing inside a span (only reachable at an unrealistically narrow width — the id line is
+    # short) falls back to one flat $GREY colour for the truncated text, same ellipsis rule as
+    # content_row() above.
+    sub content_row_multi {
+      my ($width,$spans)=@_;
+      my $text_budget = content_budget($width);
+      my $full = join("", map { $_->[0] } @$spans);
+      my $rendered;
+      if (length($full) > $text_budget) {
+        my $inner = $text_budget>0 ? substr($full,0,$text_budget-1)."…" : "";
+        $inner .= (" " x ($text_budget-length($inner))) if length($inner) < $text_budget;
+        $rendered = colorize($inner,$GREY,0);
+      } else {
+        my $pieces = join("", map { colorize($_->[0],$_->[1],0) } @$spans);
+        $rendered = $pieces.(" " x ($text_budget-length($full)));
+      }
+      $rendered = (" " x $INSET).$rendered.(" " x $INSET);
       my $bar = colorize($VBAR,$INACTIVE,0);
       return $bar.$rendered.$bar;
     }
@@ -661,6 +712,9 @@ render_text() {
       rl7  => ($rl7  ne "" ? "◴ 7d ${rl7}%"   : ""),
       eta7 => ($day7 ne "" ? "↺ ${day7}"      : ""),
     );
+    # per-token colour for the id segment — only ctx/rl5/rl7 are threshold-coloured (see
+    # pct_color() above); every other id token (id, eta5, eta7) stays $GREY, same as before.
+    my %idcolor = ( ctx => pct_color($ctx), rl5 => pct_color($rl5), rl7 => pct_color($rl7) );
     my %engval = (
       model  => ($modeldisp ne "" ? "◆ ${modeldisp}" : ""),
       effort => ($effort    ne "" ? "↯ ${effort}"     : ""),
@@ -677,16 +731,25 @@ render_text() {
     }
 
     # --- build the lines for each segment, in the CONFIGURED order ---
+    # `id` also carries its own colour spans (@spans, [text,rgb] pairs — ctx/rl5/rl7 threshold
+    # colouring, see pct_color()/%idcolor above), alongside the plain-text line — every other
+    # segment spans stays undef and renders through content_row() exactly as before.
     my @blocks;
     for my $name (@order) {
       my $cfg = $seg{$name};
-      my @lines;
+      my @lines; my $spans;
       if ($name eq "role") {
         @lines = wrap_role($role, $W, $glyph);
       } elsif ($name eq "id") {
         my @toks = seg_tokens($cfg,$narrow);
-        my @parts; for my $t (@toks) { my $v=$idval{$t}//""; push @parts,$v if $v ne ""; }
-        @lines = (join("  ",@parts));
+        my @sp;
+        for my $t (@toks) {
+          my $v = $idval{$t}//""; next if $v eq "";
+          push @sp, ["  ",$GREY] if @sp;
+          push @sp, [$v, $idcolor{$t} // $GREY];
+        }
+        $spans = \@sp;
+        @lines = (join("", map { $_->[0] } @sp));
       } elsif ($name eq "engine") {
         my @toks = seg_tokens($cfg,$narrow);
         my @parts; for my $t (@toks) { my $v=$engval{$t}//""; push @parts,$v if $v ne ""; }
@@ -697,19 +760,23 @@ render_text() {
       } else {
         @lines = ();
       }
-      push @blocks, [\@lines, $name];
+      push @blocks, [\@lines, $name, $spans];
     }
 
     my @rows;
     push @rows, plain_border($W, $TL, $TR);
     for my $bi (0..$#blocks) {
-      my ($lines,$kind) = @{$blocks[$bi]};
-      for my $ln (@$lines) {
-        if    ($kind eq "role")  { push @rows, content_row($W, $ln, $WHITE, 1); }
-        elsif ($kind eq "place") {
-          my $rgb = ($ln =~ /^[⌂…]/) ? $PATHC : $GREY;
-          push @rows, content_row($W, $ln, $rgb, 0);
-        } else { push @rows, content_row($W, $ln, $GREY, 0); }
+      my ($lines,$kind,$spans) = @{$blocks[$bi]};
+      if ($kind eq "id" && $spans) {
+        push @rows, content_row_multi($W, $spans);
+      } else {
+        for my $ln (@$lines) {
+          if    ($kind eq "role")  { push @rows, content_row($W, $ln, $WHITE, 1); }
+          elsif ($kind eq "place") {
+            my $rgb = ($ln =~ /^[⌂…]/) ? $PATHC : $GREY;
+            push @rows, content_row($W, $ln, $rgb, 0);
+          } else { push @rows, content_row($W, $ln, $GREY, 0); }
+        }
       }
       # Separator is ALWAYS single (no "active"/double-rail variant any more, removed
       # 2026-09-19, follow-up) — $busy is still computed above (drives the glyph), it just no
