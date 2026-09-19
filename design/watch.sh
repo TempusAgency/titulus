@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # design/watch.sh — live preview for the Titulus card layout.
 #
+# SANDBOX BY DEFAULT (2026-09-19): with no argument this watches `layout.sandbox.conf`, NOT the
+# live/production `layout.conf` that statusline.sh actually reads. Edit layout.sandbox.conf in
+# any text editor — this preview updates instantly — and the live card in Claude Code stays
+# completely unchanged until you explicitly run `./apply.sh` (see below). That's the whole point
+# of the sandbox: freedom to experiment without risking the card the owner already approved.
+#
 # Draws the card at the CURRENT window width, edge to edge (no fixed 80/38-column panels,
-# no side margins). Redraws the moment `layout.conf` changes on disk, the moment the window is
-# resized, or on demand (key toggle below) — so you can edit the config in your editor, or just
-# drag the window edge, and see the effect immediately without touching statusline.sh or running
-# an agent.
+# no side margins). Redraws the moment the watched file changes on disk, the moment the window
+# is resized, or on demand (key toggle below) — so you can edit the config in your editor, or
+# just drag the window edge, and see the effect immediately without touching statusline.sh or
+# running an agent.
 #
 # Two frames are shown, one under the other, both at the same width: "спокій" (state 1, idle)
 # and "рух" (state 2, agents + coord running) — so the difference between the two is visible at
@@ -40,9 +46,18 @@
 # (no key handling) when stdin isn't a terminal.
 #
 # Usage:
-#   ./watch.sh                    # watch design/layout.conf (default)
-#   ./watch.sh path/to/other.conf # watch a different layout file (e.g. a scratch copy)
+#   ./watch.sh                    # watch design/layout.sandbox.conf (default — safe, no effect
+#                                  # on the live card)
+#   ./watch.sh layout.conf        # watch the LIVE/production config instead, read-only (this
+#                                  # script never writes to whatever file it watches)
+#   ./watch.sh path/to/other.conf # watch any other layout file (e.g. a scratch copy)
 #   WCT_WATCH_INTERVAL=0.5 ./watch.sh
+#
+# Sandbox workflow:
+#   1. edit design/layout.sandbox.conf                — this preview updates live
+#   2. python3 render.py --layout layout.sandbox.conf --verify   (and --audit) — must pass
+#   3. ./apply.sh                                      — promotes sandbox -> live, with a backup
+#   4. ./rollback.sh                                   — restores live from that backup, if needed
 #
 # Keys:
 #   c        toggle width mode: full window width  <->  "as in Claude Code" (minus margin)
@@ -55,7 +70,7 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-LAYOUT="${1:-layout.conf}"
+LAYOUT="${1:-layout.sandbox.conf}"
 INTERVAL="${WCT_WATCH_INTERVAL:-0.3}"
 MIN_CARD_WIDTH=10   # floor for the "as in Claude Code" mode so width-minus-margin never goes <=0
 
@@ -63,6 +78,12 @@ if [ ! -f "$LAYOUT" ]; then
   echo "watch.sh: layout file not found: $LAYOUT" >&2
   exit 1
 fi
+
+# Is this run watching the sandbox (safe to edit) or the live/production config (read-only
+# preview here, but the SAME file statusline.sh reads for the real card)? Purely cosmetic —
+# never changes which file is watched or how it's read.
+IS_LIVE=0
+[ "$(basename -- "$LAYOUT")" = "layout.conf" ] && IS_LIVE=1
 
 FONT="$HOME/Library/Fonts/TempusGlyphs-Regular.ttf"
 if [ ! -f "$FONT" ]; then
@@ -123,7 +144,13 @@ draw() {
   fi
 
   printf '\033[H'   # cursor home — no full clear, avoids the blank-then-redraw flicker
-  printf '\033[1mTitulus — живий перегляд картки\033[0m   файл: %s   [c] режим ширини   [q]/Ctrl+C вихід\n' "$LAYOUT"
+  printf '\033[1mTitulus — живий перегляд картки\033[0m   [c] режим ширини   [q]/Ctrl+C вихід\n'
+  if [ "$IS_LIVE" = 1 ]; then
+    printf '\033[1;33m\xe2\x97\x8f БОЙОВИЙ\033[0m файл: %s — те, що бачить живий statusline.sh ПРЯМО ЗАРАЗ. Це прев'"'"'ю нічого не пише в цей файл, тільки читає.\n' "$LAYOUT"
+  else
+    printf '\033[1;32m\xe2\x97\x8f ПІСОЧНИЦЯ\033[0m файл: %s — редагуй сміливо, на живу картку в Claude Code це НЕ впливає.\n' "$LAYOUT"
+    printf 'Коли готово: python3 render.py --layout %s --verify  &&  python3 render.py --layout %s --audit, тоді ./apply.sh (перенесе в бойовий, з бекапом).\n' "$LAYOUT" "$LAYOUT"
+  fi
   printf 'вікно: %s кол.   режим: %s   ширина картки: %s кол.   оновлено: %s\n' \
     "$tw" "$mode_label" "$w" "$(date '+%H:%M:%S')"
   printf '%s\n\n' "$note"
@@ -140,7 +167,7 @@ draw() {
 
   echo
   echo "Правила ширини/токенів — дивись коментар на початку $LAYOUT."
-  echo "Після правки: python3 render.py --verify && python3 render.py --audit"
+  echo "Після правки: python3 render.py --layout $LAYOUT --verify && python3 render.py --layout $LAYOUT --audit"
   echo "Прев'ю в середовищах (Claude Code реальний / Codex макет): ./preview-env.sh"
   printf '\033[0J'   # erase anything left over below from a taller previous frame
 }
