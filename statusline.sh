@@ -21,6 +21,16 @@
 # U+E87E / U+E881); TR/BL are always the plain ┐ / └. Branch glyph is ↱ (U+21B1), NOT ⎇ — the
 # latter is missing from the font stack in use and renders broken.
 #
+# LAYOUT CONFIG (2026-09-19): segment order and which tokens show up in each segment are no longer
+# hardcoded here — they are read from the SAME `design/layout.conf` file that `design/render.py`
+# reads (see that file's header for the format). This is the ONE description of the card's layout;
+# editing it changes both the design demo and this production script identically. COST DISCIPLINE
+# still applies: the config file is opened and parsed INSIDE the existing single perl process
+# (`render_text`, below) — resolving its path in bash uses only parameter expansion and `[ -f ]`
+# tests (bash builtins, zero forks), and reading/parsing it happens with perl's own `open()`, not a
+# new subprocess. No fork was added by this change — see the handback report for the exact
+# before/after subprocess count.
+#
 # Removed in this port (2026-09-18, variant B rollout): the old flat "▸ Задача / ◃ Попередня"
 # AI-summary lines. The boxed design (render.py Scene / REFERENCE.md) has no slot for them — the
 # role line replaces that orienting function. The background writer (topic-update.sh) still writes
@@ -33,13 +43,13 @@
 # design/REFERENCE.md — four segments, always, id back inside its own segment with the counters,
 # engine+movement back on one line.
 #
-# COST DISCIPLINE (rework 2026-06-07, reaffirmed 2026-09-18 during the box-layout port): this
-# script runs on a GLOBAL config, so every fork is multiplied by the count of live sessions
-# (~40). ALL char-aware work — role word-wrap, path truncation, box-frame drawing (borders,
-# separators, padding, rails), colouring — happens in the ONE perl pass (`render_text`), exactly
-# as before the port. No python, no extra forks were added for the new layout; see the handback
-# report for the before/after subprocess count. Before adding any per-render command, remember it
-# costs ×(live sessions).
+# COST DISCIPLINE (rework 2026-06-07, reaffirmed 2026-09-18 during the box-layout port, and again
+# 2026-09-19 during the layout.conf port): this script runs on a GLOBAL config, so every fork is
+# multiplied by the count of live sessions (~40). ALL char-aware work — role word-wrap, path
+# truncation, box-frame drawing (borders, separators, padding, rails), colouring, AND NOW layout
+# config parsing — happens in the ONE perl pass (`render_text`), exactly as before the port. No
+# python, no extra forks were added for the new layout or for the config file. Before adding any
+# per-render command, remember it costs ×(live sessions).
 set -uo pipefail
 
 cache_dir="${TMPDIR:-/tmp}/wave-chat-title"   # ephemeral AI cache (macOS wipes TMPDIR)
@@ -176,6 +186,24 @@ else
 fi
 case "$W" in ""|*[!0-9]*) W=38;; esac
 
+# layout config path — resolution chain, ZERO forks (pure bash builtins: parameter expansion +
+# `[ -f ]` tests). Two candidates, checked in order:
+#   1) repo/dev mode: a `design/layout.conf` sibling of THIS script's own directory (true when
+#      running straight out of the plugin repo — e.g. `bash statusline.sh` from a checkout, or a
+#      plugin-cache copy that still carries the whole repo tree next to it).
+#   2) installed mode: `$user_dir/layout.conf` — the persistent copy `install.sh` seeds into
+#      `~/.claude/wave-chat-title/` (the SAME directory as the stable statusline.sh copy), since
+#      the installed copy is detached from the repo and has no `design/` sibling.
+# If neither exists, LAYOUT_CONF is left empty and the perl pass below falls back to an embedded
+# default that reproduces the original (pre-config) hardcoded layout exactly.
+_self="${BASH_SOURCE[0]:-$0}"
+script_dir="${_self%/*}"
+[ "$script_dir" = "$_self" ] && script_dir="."
+layout_conf=""
+if   [ -f "$script_dir/design/layout.conf" ]; then layout_conf="$script_dir/design/layout.conf"
+elif [ -f "$user_dir/layout.conf" ]; then layout_conf="$user_dir/layout.conf"
+fi
+
 # build the clean working-dir list (cwd + every /add-dir'd dir), empties filtered, used for the
 # place segment (one row/pair per dir).
 rawdirs=("$cwd")
@@ -305,11 +333,14 @@ for dd in ${dirs[@]+"${dirs[@]}"}; do
 done
 
 # ONE perl pass for ALL char-aware (Cyrillic) work AND the entire box frame: role word-wrap, path
-# truncation, borders/separators/content-row padding, rails (single/double), colouring. Nothing
-# outside this call touches character widths. Emits the finished card (with embedded newlines) on
-# stdout — a single command substitution below, no new fork beyond this one perl process.
+# truncation, borders/separators/content-row padding, rails (single/double), colouring, AND (since
+# 2026-09-19) parsing `design/layout.conf` to decide segment order + which tokens each segment
+# shows. Nothing outside this call touches character widths, and nothing outside it opens the
+# layout file. Emits the finished card (with embedded newlines) on stdout — a single command
+# substitution below, no new fork beyond this one perl process (config parsing is an in-process
+# `open()`, not a subprocess).
 render_text() {
-  W="$W" perl -CSA -Mutf8 -e '
+  W="$W" LAYOUT_CONF="$layout_conf" perl -CSA -Mutf8 -e '
     my $W=$ENV{W}+0;
     my ($glyph,$sid,$busy,$role,$ctx,$rl5,$eta5,$rl7,$day7,$modeldisp,$effort,$prchip,
         $agentstok,$wftok,$coordtok,@rest)=@ARGV;
@@ -414,21 +445,36 @@ render_text() {
       return @lines;
     }
 
+    # build_place_lines: token-driven — $tokorder is the ordered list of
+    # dir/branch/path tokens for THIS segment (from layout.conf), $nlayout
+    # is "split" (path gets its own line at narrow width) or "inline".
     sub build_place_lines {
-      my ($entries,$width,$narrow)=@_;
+      my ($entries,$width,$narrow,$tokorder,$nlayout)=@_;
       my $budget_total = $width-3;
+      my @lead_toks = grep { $_ ne "path" } @$tokorder;
+      my $has_path  = grep { $_ eq "path" } @$tokorder;
       my @lines;
       for my $e (@$entries) {
         my ($name,$branch,$path) = @$e;
-        if ($narrow) {
-          push @lines, "⌂ $name  $BRANCHG $branch";
+        my @lead_parts;
+        for my $t (@lead_toks) {
+          if    ($t eq "dir")    { push @lead_parts, "⌂ $name"; }
+          elsif ($t eq "branch") { push @lead_parts, "$BRANCHG $branch"; }
+        }
+        my $lead_str = join("  ", @lead_parts);
+        if ($narrow && $nlayout eq "split" && $has_path) {
+          push @lines, $lead_str;
           my $pb = $budget_total; $pb=1 if $pb<1;
           push @lines, truncate_path($path,$pb);
-        } else {
-          my $prefix = "⌂ $name  $BRANCHG $branch  ↳ ";
+        } elsif ($has_path) {
+          my $prefix = $lead_str ne "" ? "$lead_str  ↳ " : "↳ ";
           my $pb = $budget_total - length($prefix); $pb=1 if $pb<1;
           my $ptext = length($path) <= $pb ? $path : truncate_path($path,$pb);
           my $line = $prefix.$ptext;
+          if (length($line) > $budget_total) { $line = substr($line,0,$budget_total-1)."…"; }
+          push @lines, $line;
+        } else {
+          my $line = $lead_str;
           if (length($line) > $budget_total) { $line = substr($line,0,$budget_total-1)."…"; }
           push @lines, $line;
         }
@@ -442,48 +488,101 @@ render_text() {
       push @entries, [$f[0]//"", $f[1]//"", $f[2]//""];
     }
 
-    # --- segment 1: role ---
-    my @role_lines = wrap_role($role, $W, $glyph);
-
-    # --- segment 2: id + counters (narrow: CTX only) ---
-    my @idparts;
-    push @idparts, "◷ CTX ${ctx}%" if $ctx ne "";
-    unless ($narrow) {
-      push @idparts, "◴ 5h ${rl5}%" if $rl5 ne "";
-      push @idparts, "↺ ${eta5}" if $eta5 ne "";
-      push @idparts, "◴ 7d ${rl7}%" if $rl7 ne "";
-      push @idparts, "↺ ${day7}" if $day7 ne "";
+    # ---------------------------------------------------------------------
+    # layout.conf — parsed HERE, inside the already-running perl process.
+    # Format documented in design/layout.conf; kept intentionally simple
+    # (line-based, no nesting) so a hand-rolled parser is enough — no JSON
+    # module, no extra dependency, no extra fork.
+    # ---------------------------------------------------------------------
+    my @order;
+    my %seg;
+    my $layout_conf = $ENV{LAYOUT_CONF} // "";
+    if ($layout_conf ne "" && open(my $lf, "<:encoding(UTF-8)", $layout_conf)) {
+      my $cur;
+      while (my $line = <$lf>) {
+        $line =~ s/^\s+|\s+$//g;
+        next if $line eq "" || $line =~ /^#/;
+        if ($line =~ /^order:\s*(.+)$/) { @order = split /\s+/, $1; next; }
+        if ($line =~ /^\[(\w+)\]$/) {
+          $cur = $1;
+          $seg{$cur} = { tokens=>[], narrow_tokens=>undef, active=>"never", narrow_layout=>"inline" };
+          next;
+        }
+        next unless defined $cur;
+        if ($line =~ /^tokens:\s*(.*)$/)        { $seg{$cur}{tokens} = [split /\s+/, $1]; next; }
+        if ($line =~ /^narrow_tokens:\s*(.*)$/)  { $seg{$cur}{narrow_tokens} = [split /\s+/, $1]; next; }
+        if ($line =~ /^active:\s*(\S+)$/)        { $seg{$cur}{active} = $1; next; }
+        if ($line =~ /^narrow_layout:\s*(\S+)$/) { $seg{$cur}{narrow_layout} = $1; next; }
+      }
+      close $lf;
     }
-    my $id_line = "$glyph $sid".(@idparts ? "  ".join("  ",@idparts) : "");
+    unless (@order) {
+      # embedded fallback — reproduces the original (pre-config) hardcoded layout exactly, so a
+      # missing/unreadable layout.conf never breaks the card.
+      @order = qw(role id engine place);
+      %seg = (
+        role   => { tokens=>["role"], narrow_tokens=>undef, active=>"never", narrow_layout=>"inline" },
+        id     => { tokens=>[qw(id ctx rl5 eta5 rl7 eta7)], narrow_tokens=>[qw(id ctx)],
+                    active=>"never", narrow_layout=>"inline" },
+        engine => { tokens=>[qw(model effort pr agents wf coord)], narrow_tokens=>undef,
+                    active=>"busy", narrow_layout=>"inline" },
+        place  => { tokens=>[qw(dir branch path)], narrow_tokens=>undef,
+                    active=>"never", narrow_layout=>"split" },
+      );
+    }
+    for my $name (@order) {
+      $seg{$name} //= { tokens=>[], narrow_tokens=>undef, active=>"never", narrow_layout=>"inline" };
+    }
 
-    # --- segment 3: engine (model + effort [+ PR]) + movement, ALWAYS one
-    # segment, ALWAYS present — movement tokens are appended to the SAME
-    # line (or wrapped onto a continuation line of the SAME segment) when
-    # there is something to show, never a segment of their own. ---
-    my @eparts;
-    push @eparts, "◆ ${modeldisp}" if $modeldisp ne "";
-    push @eparts, "↯ ${effort}" if $effort ne "";
-    push @eparts, $prchip if $prchip ne "";
-    push @eparts, $agentstok if $agentstok ne "";
-    push @eparts, $wftok if $wftok ne "";
-    push @eparts, $coordtok if $coordtok ne "";
-    my @engine_lines = wrap_tokens(\@eparts, $W);
-
-    # --- segment 4: place ---
-    my @place_lines = build_place_lines(\@entries, $W, $narrow);
-
-    # Four segments, always, in this order. Only segment 3 (engine+movement)
-    # can be "active"; segments 1/2/4 never carry their own active flag. A
-    # separator lights up (double rail) if either side it sits between is
-    # active — so only the id|engine and engine|place separators can ever go
-    # double; the role|id separator and the outer top/bottom borders stay a
-    # plain single rail.
-    my @blocks = (
-      [\@role_lines,   0,     "role"],
-      [[$id_line],     0,     "id"],
-      [\@engine_lines, $busy, "engine"],
-      [\@place_lines,  0,     "place"],
+    # token value catalogue — id/engine segments. Empty string = "nothing to show", dropped by
+    # the caller, never leaves a gap (same rule as the render.py token_value_* helpers).
+    my %idval = (
+      id   => "$glyph $sid",
+      ctx  => ($ctx  ne "" ? "◷ CTX ${ctx}%"  : ""),
+      rl5  => ($rl5  ne "" ? "◴ 5h ${rl5}%"   : ""),
+      eta5 => ($eta5 ne "" ? "↺ ${eta5}"      : ""),
+      rl7  => ($rl7  ne "" ? "◴ 7d ${rl7}%"   : ""),
+      eta7 => ($day7 ne "" ? "↺ ${day7}"      : ""),
     );
+    my %engval = (
+      model  => ($modeldisp ne "" ? "◆ ${modeldisp}" : ""),
+      effort => ($effort    ne "" ? "↯ ${effort}"     : ""),
+      pr     => $prchip,
+      agents => $agentstok,
+      wf     => $wftok,
+      coord  => $coordtok,
+    );
+
+    sub seg_tokens {
+      my ($cfg,$narrow)=@_;
+      return @{$cfg->{narrow_tokens}} if ($narrow && defined $cfg->{narrow_tokens});
+      return @{$cfg->{tokens}};
+    }
+
+    # --- build the lines for each segment, in the CONFIGURED order ---
+    my @blocks;
+    for my $name (@order) {
+      my $cfg = $seg{$name};
+      my @lines;
+      if ($name eq "role") {
+        @lines = wrap_role($role, $W, $glyph);
+      } elsif ($name eq "id") {
+        my @toks = seg_tokens($cfg,$narrow);
+        my @parts; for my $t (@toks) { my $v=$idval{$t}//""; push @parts,$v if $v ne ""; }
+        @lines = (join("  ",@parts));
+      } elsif ($name eq "engine") {
+        my @toks = seg_tokens($cfg,$narrow);
+        my @parts; for my $t (@toks) { my $v=$engval{$t}//""; push @parts,$v if $v ne ""; }
+        @lines = wrap_tokens(\@parts, $W);
+      } elsif ($name eq "place") {
+        my @toks = seg_tokens($cfg,$narrow);
+        @lines = build_place_lines(\@entries, $W, $narrow, \@toks, $cfg->{narrow_layout});
+      } else {
+        @lines = ();
+      }
+      my $active = ($cfg->{active} eq "busy") ? $busy : 0;
+      push @blocks, [\@lines, $active, $name];
+    }
 
     my @rows;
     push @rows, plain_border($W, $TL, $TR);

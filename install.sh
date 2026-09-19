@@ -35,6 +35,16 @@ if [ ! -f "$DATA/config.sh" ]; then
   echo "• seeded personal overlay → $DATA/config.sh (edit to tune)"
 fi
 
+# 2b) seed the card LAYOUT config, same never-overwrite rule — this is the file that decides
+# segment order + which tokens show up in each segment (see design/layout.conf's own header for
+# the format). The installed statusline.sh is a detached copy with no design/ sibling, so it reads
+# this seeded copy at $DATA/layout.conf (statusline.sh's own resolution chain: repo-relative
+# design/layout.conf first, THIS path second). Never overwritten on update, so hand edits survive.
+if [ ! -f "$DATA/layout.conf" ]; then
+  cp "$SELF/design/layout.conf" "$DATA/layout.conf"
+  echo "• seeded card layout → $DATA/layout.conf (edit to rearrange segments/tokens)"
+fi
+
 # 3) set .statusLine in settings.json, preserving every other key AND any sibling statusLine
 #    keys the user set (padding/refreshInterval); seeds refreshInterval:300 (seconds) for new installs
 #    — global setting, cost ×(live sessions); floor is 30 per CLAUDE.md. Validate first; back up + write only on change.
