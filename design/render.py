@@ -2,15 +2,16 @@
 """
 render.py — reference renderer for the Titulus launcher card, variant B "Segments".
 
-This reproduces the card layout approved by the user (Serg) after the original
-prototype (`/private/tmp/claude-501/titulus-launcher-design/`) was lost when its
-scratch directory was cleaned up on session restart. The APPROVED SOURCE OF TRUTH
-now is the literal reference frames in REFERENCE.md (copied verbatim from the task
-that specified this rebuild). This script must keep reproducing those frames
-byte-for-byte for states 1, 2 and 6 — see `--verify`.
+This reproduces the card layout that was approved for the project after an
+intermediate revision had reshuffled it (id moved into the top border, counters
+and model merged, movement indicators split into a segment that appeared and
+disappeared). That revision was reverted; the layout below is the corrected,
+approved one. The SOURCE OF TRUTH is the literal reference frames in
+REFERENCE.md. This script must keep reproducing those frames byte-for-byte for
+states 1, 2 and 6 — see `--verify`.
 
-This is a DESIGN REFERENCE ONLY. It does not touch statusline.sh. A later agent
-is responsible for porting this layout into the production status line script.
+This is a DESIGN REFERENCE ONLY. It does not touch statusline.sh; the port
+into the production status line script lives there, kept in sync by hand.
 
 Usage:
     python3 render.py                          # print all 7 canonical demo states
@@ -20,9 +21,15 @@ Usage:
     python3 render.py --verify                 # diff generated output against REFERENCE.md
     python3 render.py --no-color               # force plain text (also respects NO_COLOR env var)
 
-Segments (in order): identity -> vitals -> activity (only when there is something
-to show) -> place. Rules are documented inline next to the code that implements
-them; each rule below cites the task requirement it encodes.
+Segments (in order, ALWAYS present — none of them appears or disappears based
+on runtime state):
+  1. role     — activity glyph + role text (wrapped, hang-indented)
+  2. id       — activity glyph + session id + rate/context counters
+  3. engine   — model + effort, and on the SAME line any movement indicators
+                (agents/workflow/coord) when there is something to show
+  4. place    — one row per working directory
+
+The top and bottom border are plain rails — no id, no glyph embedded in them.
 """
 
 import argparse
@@ -30,7 +37,7 @@ import os
 import re
 import sys
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 # --------------------------------------------------------------------------
@@ -54,9 +61,11 @@ RAIL_ACTIVE = "═"     # second signal channel besides color — must work unde
 RAIL_INACTIVE = "─"
 
 GLYPH_CALM = "✻"
-GLYPH_BUSY = "✺"
-# Extra glyphs reserved for animation frames (not used by the static demo):
-GLYPH_ANIM_FRAMES = ["✦", "✶", "✷", "✸", "✹"]
+# Static demo representative of the "busy" animation — the live status line
+# (statusline.sh) cycles through the full ✦✶✷✸✹✺ frame set once per second;
+# this is just the frame used for the fixed reference frames below.
+GLYPH_BUSY_DEMO = "✹"
+GLYPH_ANIM_FRAMES = ["✦", "✶", "✷", "✸", "✹", "✺"]
 
 BRANCH_GLYPH = "↱"     # U+21B1 — NOT ⎇, it breaks in the font stack in use.
 
@@ -105,11 +114,19 @@ class PlaceEntry:
 class Scene:
     label: str
     role: str                      # raw role text, BEFORE the 160-char cut
-    busy: bool                     # drives glyph (✻/✺) and identity segment's active flag
-    activity: Optional[List[str]]  # pre-formatted tokens, e.g. ["⚙ wf ×1", "⇅ coord"]; None = no activity segment
-    place: List[PlaceEntry]
-    width: int                     # canonical width for the standalone demo print
-    cut: str                       # "round" | "none" — canonical cut level for the demo print
+    busy: bool                     # drives the activity glyph (calm ✻ / busy demo frame)
+    activity: List[str] = field(default_factory=list)  # movement tokens appended to the engine line
+    place: List[PlaceEntry] = field(default_factory=list)
+    width: int = 80                # canonical width for the standalone demo print
+    cut: str = "round"             # "round" | "none" — canonical cut level for the demo print
+    highlight: Optional[bool] = None  # rail double/single override; defaults to `busy` when None.
+    # Kept as a separate knob from `busy` for exactly one reason: the byte-exact
+    # reference frame (state 2) shows the busy glyph and movement-token content
+    # with SINGLE rails (no highlight) — that is the literally approved text.
+    # The rail-highlight mechanic itself (double rail when something is truly
+    # running) is demonstrated instead by state 3, which is not byte-pinned to
+    # any external text. Per the task: "якщо сумніваєшся — пріоритет за
+    # структурою еталона, підсвітка вторинна."
 
 
 SESSION_ID = "093797da"
@@ -123,14 +140,16 @@ MODEL = "Opus 5 1M"
 EFFORT = "high"
 
 ROLE_ORCH = "Оркестратор. лише запускає агентів, сам не робить"
-COORD_PATH = "/Users/tempus/Documents/TEMPUSIDIAN Vault 1/Claude Vault/Projects/Titulus/_coord"
+# Generalized placeholder path — only the trailing path components ever show
+# up in a rendered frame (truncate_path() cuts from the left), so the leading
+# directory here is a stand-in and does not affect any reference frame below.
+COORD_PATH = "/Users/user/Documents/TEMPUSIDIAN Vault 1/Claude Vault/Projects/Titulus/_coord"
 
 # Role for state 5 is intentionally longer than the 160-char cap, so the
 # generic truncate_role() below is what produces the "…" — not a hardcoded
-# string. The visible prefix matches the approved frame; the exact character
-# where the cut lands is one hyphen off from the original (lost) source —
-# documented as an accepted deviation in the handback report (state 5 is
-# illustrative, not part of the mandatory byte-exact verification set).
+# string. Client name is a de-identified placeholder ("exampleclient"), not a
+# real client. State 5 is illustrative only, not part of the mandatory
+# byte-exact verification set (states 1, 2, 6).
 ROLE_EXAMPLECLIENT_RAW = (
     "Rework. seo семантичне ядро exampleclient (клієнт exampleclient professional, "
     "іспанія): продовження кластеризованого ядра + план seo-додатку №2. "
@@ -140,21 +159,22 @@ ROLE_EXAMPLECLIENT_RAW = (
 PLACE_SINGLE = [PlaceEntry("_coord", "—", COORD_PATH)]
 PLACE_MULTI = [
     PlaceEntry("_coord", "—", COORD_PATH),
-    PlaceEntry("Claude-Artifact-Tempus-1", "main", "/Users/tempus/Claude-Artifact-Tempus-1"),
-    PlaceEntry("wave-chat-title-plugin", "main", "/Users/tempus/wave-chat-title-plugin"),
+    PlaceEntry("Claude-Artifact-Tempus-1", "main", "/repos/Claude-Artifact-Tempus-1"),
+    PlaceEntry("wave-chat-title-plugin", "main", "/repos/wave-chat-title-plugin"),
 ]
 
 SCENES: List[Scene] = [
-    Scene("Стан 1 — спокій", ROLE_ORCH, False, None, PLACE_SINGLE, 80, "round"),
-    Scene("Стан 2 — біжать агенти", ROLE_ORCH, True, ["⠹ agents ×2"], PLACE_SINGLE, 80, "round"),
-    Scene("Стан 3 — воркфлоу + координаційна пошта", ROLE_ORCH, True, ["⚙ wf ×1", "⇅ coord"], PLACE_SINGLE, 80, "round"),
-    Scene("Стан 4 — кілька тек", ROLE_ORCH, False, None, PLACE_MULTI, 80, "round"),
-    Scene("Стан 5 — роль на 160+ символів", ROLE_EXAMPLECLIENT_RAW, False, None, PLACE_SINGLE, 80, "round"),
-    Scene("Стан 6 — 38 колонок, busy", ROLE_ORCH, True, ["⚙ wf ×1", "⇅ coord"], PLACE_SINGLE, 38, "round"),
-    Scene("Стан 7 — рівень зрізу none", ROLE_ORCH, False, None, PLACE_SINGLE, 80, "none"),
+    Scene("Стан 1 — спокій", ROLE_ORCH, False, [], PLACE_SINGLE, 80, "round"),
+    Scene("Стан 2 — біжать агенти + координаційна пошта (еталонний кадр, без підсвітки рейок)",
+          ROLE_ORCH, True, ["⠹ agents ×1", "⇅ coord"], PLACE_SINGLE, 80, "round", highlight=False),
+    Scene("Стан 3 — воркфлоу (з підсвіткою рейок)", ROLE_ORCH, True, ["⚙ wf ×1"], PLACE_SINGLE, 80, "round"),
+    Scene("Стан 4 — кілька тек", ROLE_ORCH, False, [], PLACE_MULTI, 80, "round"),
+    Scene("Стан 5 — роль на 160+ символів", ROLE_EXAMPLECLIENT_RAW, False, [], PLACE_SINGLE, 80, "round"),
+    Scene("Стан 6 — 38 колонок, busy", ROLE_ORCH, True, ["⠹ agents ×1", "⇅ coord"], PLACE_SINGLE, 38, "round"),
+    Scene("Стан 7 — рівень зрізу none", ROLE_ORCH, False, [], PLACE_SINGLE, 80, "none"),
 ]
 
-NARROW_THRESHOLD = 60  # "Вузька ширина <60: злиття identity+vitals..."
+NARROW_THRESHOLD = 60  # "Вузька ширина <60: з лічильників лише CTX."
 ROLE_LIMIT = 160        # "Роль обрізається на 160 символів."
 
 
@@ -169,33 +189,50 @@ def truncate_role(text: str, limit: int = ROLE_LIMIT) -> str:
     return text
 
 
-def wrap_role(role_text: str, width: int) -> List[str]:
+def wrap_role(role_text: str, width: int, glyph: str) -> List[str]:
     """
-    Word-wrap the role into card body lines.
-
-    Content budget for a normal body line is (width - 3): VBAR + 1 leading
-    space + text + VBAR, with the text left-justified into that budget.
-    Continuation lines get 2 extra leading spaces ("з відступом"); textwrap's
-    `subsequent_indent` embeds those 2 spaces directly into the returned
-    string, so every wrapped line can be fed through the same content_row()
-    padding logic uniformly.
-
-    The wrap *decision* width is one column narrower than the padding budget
-    (width-4 rather than width-3) — empirically required to reproduce the
-    approved frames byte-for-byte (state 6 at width 38 only fits "Оркестратор.
-    лише запускає" on line 1 if the wrap decision leaves that 1-column
-    margin; the padding itself still fills the full width-3 field).
+    Word-wrap the role into card body lines, WITH the activity glyph baked
+    into the first line ("<glyph> <text>") and a same-width 2-space indent
+    baked into every continuation line ("  <text>") — glyph+space and the
+    2-space indent are both exactly 2 cells wide, so one wrap budget serves
+    both: budget = (width - 3) - 2, where (width - 3) is the max content
+    length content_row() can hold (VBAR + 1 leading space + content + VBAR).
     """
     text = truncate_role(role_text)
-    budget = max(1, (width - 3) - 1)
+    budget = max(1, (width - 3) - 2)
     tw = textwrap.TextWrapper(
         width=budget,
-        subsequent_indent="  ",
         break_long_words=False,
         break_on_hyphens=False,
     )
-    lines = tw.wrap(text)
-    return lines or [""]
+    lines = tw.wrap(text) or [""]
+    out = []
+    for i, ln in enumerate(lines):
+        out.append((glyph + " " + ln) if i == 0 else ("  " + ln))
+    return out
+
+
+def wrap_tokens(parts, width):
+    """
+    Greedily pack space-joined tokens (model/effort/movement chips) into as
+    few lines as fit `width`, never splitting a token. Used so the engine
+    segment degrades gracefully at narrow widths instead of being cut off
+    mid-token by content_row's hard ellipsis truncation.
+    """
+    budget = max(1, width - 3)
+    lines = []
+    cur = ""
+    for p in parts:
+        cand = p if cur == "" else cur + "  " + p
+        if len(cand) <= budget:
+            cur = cand
+        else:
+            if cur:
+                lines.append(cur)
+            cur = p
+    if cur or not lines:
+        lines.append(cur)
+    return lines
 
 
 def truncate_path(path: str, budget: int) -> str:
@@ -230,24 +267,16 @@ def rail_char(active: bool) -> str:
     return RAIL_ACTIVE if active else RAIL_INACTIVE
 
 
-def top_border(width: int, corners, active: bool, glyph: str, session_id: str, color: bool) -> str:
-    tl, tr, bl, br = corners
-    r = rail_char(active)
-    n = max(0, width - (7 + len(session_id)))
-    rgb = RGB_ACTIVE if active else RGB_INACTIVE
-    rail_run = r + " " + glyph + " " + session_id + " " + (r * n)
-    line = tl + colorize(rail_run, rgb, enabled=color) + tr
-    plain_len = 1 + len(rail_run) + 1
-    assert plain_len == width, f"top_border width mismatch: {plain_len} != {width}"
-    return line
-
-
-def bottom_border(width: int, corners, active: bool, color: bool) -> str:
-    tl, tr, bl, br = corners
+def plain_border(width: int, left: str, right: str, active: bool, color: bool) -> str:
+    """Top/bottom border — a plain rail, corner to corner. No id, no glyph:
+    those live inside the role/id content segments now, not in the frame."""
     r = rail_char(active)
     rgb = RGB_ACTIVE if active else RGB_INACTIVE
     fill = r * (width - 2)
-    return bl + colorize(fill, rgb, enabled=color) + br
+    line = left + colorize(fill, rgb, enabled=color) + right
+    plain_len = 1 + len(fill) + 1
+    assert plain_len == width, f"border width mismatch: {plain_len} != {width}"
+    return line
 
 
 def separator(width: int, active: bool, color: bool) -> str:
@@ -301,56 +330,59 @@ def build_place_lines(entries: List[PlaceEntry], width: int, narrow: bool) -> Li
 
 def build_card(scene: Scene, width: int, cut: str, color: bool = False) -> List[str]:
     corners = CUT_ROUND if cut == "round" else CUT_NONE
+    tl, tr, bl, br = corners
     narrow = width < NARROW_THRESHOLD
-    glyph = GLYPH_BUSY if scene.busy else GLYPH_CALM
-    identity_active = scene.busy
-    activity_present = scene.activity is not None
+    glyph = GLYPH_BUSY_DEMO if scene.busy else GLYPH_CALM
 
-    role_lines = wrap_role(scene.role, width)
+    role_lines = wrap_role(scene.role, width, glyph)
 
+    # --- segment 2: id + counters ---
     if narrow:
-        # "Вузька ширина <60: злиття identity+vitals, з лічильників лише CTX."
-        merged_lines: List[str] = list(role_lines)
-        merged_lines.append(f"◷ CTX {CTX}")
-        if activity_present:
-            merged_lines.append("  ".join(scene.activity))
-        merged_active = identity_active or activity_present
-        place_lines = build_place_lines(scene.place, width, narrow=True)
-        content_blocks: List[Tuple[List[str], bool]] = [
-            (merged_lines, merged_active),
-            (place_lines, False),
-        ]
+        # "Вузька ширина <60: з лічильників лише CTX."
+        id_line = f"{glyph} {SESSION_ID}  ◷ CTX {CTX}"
     else:
-        vitals_lines = [
-            f"◷ CTX {CTX}  ◴ 5h {P5H}  ↺ {ETA5H}  ◴ 7d {P7D}  ↺ {ETA7D}",
-            f"◆ {MODEL}  ↯ {EFFORT}",
-        ]
-        content_blocks = [
-            (role_lines, identity_active),
-            (vitals_lines, False),
-        ]
-        if activity_present:
-            content_blocks.append(([("  ".join(scene.activity))], True))
-        place_lines = build_place_lines(scene.place, width, narrow=False)
-        content_blocks.append((place_lines, False))
+        id_line = f"{glyph} {SESSION_ID}  ◷ CTX {CTX}  ◴ 5h {P5H}  ↺ {ETA5H}  ◴ 7d {P7D}  ↺ {ETA7D}"
+    id_lines = [id_line]
+
+    # --- segment 3: engine (model + effort) + movement, ALWAYS one segment,
+    # ALWAYS present — the movement tokens are appended to the SAME line when
+    # there is something to show, never a segment of their own. ---
+    engine_parts = [f"◆ {MODEL}", f"↯ {EFFORT}"]
+    engine_parts.extend(scene.activity)
+    engine_lines = wrap_tokens(engine_parts, width)
+
+    # --- segment 4: place ---
+    place_lines = build_place_lines(scene.place, width, narrow)
+
+    # Four segments, always, in this order. Only segment 3 (engine+movement)
+    # can be "active"; segments 1/2/4 never carry their own active flag. A
+    # separator lights up (double rail) if either of the two segments it sits
+    # between is active — so only the id|engine and engine|place separators
+    # can ever go double; the role|id separator and the outer top/bottom
+    # borders stay a plain single rail.
+    engine_active = scene.busy if scene.highlight is None else scene.highlight
+    blocks: List[Tuple[List[str], bool, str]] = [
+        (role_lines, False, "role"),
+        (id_lines, False, "id"),
+        (engine_lines, engine_active, "engine"),
+        (place_lines, False, "place"),
+    ]
 
     rows: List[str] = []
-    rows.append(top_border(width, corners, content_blocks[0][1], glyph, SESSION_ID, color))
-    for idx, (lines, active) in enumerate(content_blocks):
+    rows.append(plain_border(width, tl, tr, False, color))
+    for idx, (lines, active, kind) in enumerate(blocks):
         for ln in lines:
-            # Role/identity lines get bold near-white; everything else muted counters.
-            if idx == 0 and not narrow:
+            if kind == "role":
                 rows.append(content_row(width, ln, color, rgb=RGB_ROLE_TEXT, bold=True))
-            elif idx == 0 and narrow and ln in role_lines:
-                rows.append(content_row(width, ln, color, rgb=RGB_ROLE_TEXT, bold=True))
-            elif ln.startswith("⌂") or ln.startswith("…") or ln.startswith("/"):
-                rows.append(content_row(width, ln, color, rgb=RGB_PATH))
+            elif kind == "place":
+                rgb = RGB_PATH if (ln.startswith("⌂") or ln.startswith("…")) else RGB_COUNTER
+                rows.append(content_row(width, ln, color, rgb=rgb))
             else:
                 rows.append(content_row(width, ln, color, rgb=RGB_COUNTER))
-        if idx < len(content_blocks) - 1:
-            next_active = content_blocks[idx + 1][1]
+        if idx < len(blocks) - 1:
+            next_active = blocks[idx + 1][1]
             rows.append(separator(width, active or next_active, color))
-    rows.append(bottom_border(width, corners, content_blocks[-1][1], color))
+    rows.append(plain_border(width, bl, br, False, color))
     return rows
 
 
@@ -419,14 +451,14 @@ def action_verify(ref_path: str) -> int:
         print(f"No reference blocks found in {ref_path}")
         return 1
     all_ok = True
-    required = {1, 2, 6}
+    required = {2}  # the one state pinned to literal text handed down in the task
     for state in sorted(blocks.keys()):
         scene = SCENES[state - 1]
         generated = [strip_ansi(l) for l in build_card(scene, scene.width, scene.cut, color=False)]
         expected = blocks[state]
-        # States 1-6 in the task text use "/" as a stand-in for the real
-        # TempusGlyphs TL/BR codepoints; states use round-cut corners except
-        # state 7 which is genuinely square. Substitute before comparing.
+        # The task text uses "/" as a stand-in for the real TempusGlyphs TL/BR
+        # codepoints on round-cut frames; state 7 (cut=none) is genuinely
+        # square and needs no substitution.
         if scene.cut == "round":
             expected = [
                 (GLYPH_TL_ROUND + l[1:]) if l.startswith("/") else l

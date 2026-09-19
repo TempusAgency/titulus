@@ -1,21 +1,22 @@
 #!/usr/bin/env bash
-# wave-chat-title — Claude Code status line card: variant B «Сегменти» — a boxed card with
-# segments identity (id+role) -> vitals (CTX/5h/7d/model/effort) -> activity (agents/wf/coord,
-# only when there is something to show) -> place (working directories). Ported from the approved
-# reference renderer `design/render.py` / `design/REFERENCE.md` (do not edit those — they are the
-# spec + contract test). Top→bottom:
-#   ╭─ <glyph> <id> ───────────────────────────────────────────╮   top border: id + animated glyph
-#   │ <role text, wrapped, hang-indented>                      │   identity
-#   ├────────────────────────────────────────────────────────── ┤   separator (double rail if active)
-#   │ ◷ CTX N%  ◴ 5h N%  ↺ eta  ◴ 7d N%  ↺ eta                 │   vitals row 1
-#   │ ◆ model  ↯ effort  [⇄ PR #N state]                       │   vitals row 2
-#   ├──────────────────────────────────────────────────────────┤   (only if agents/wf/coord)
-#   │ ⠹ agents ×N  ⚙ wf ×N  ⇅ coord                            │   activity
-#   ├──────────────────────────────────────────────────────────┤
+# wave-chat-title — Claude Code status line card: variant B «Сегменти» — a boxed card with FOUR
+# segments, ALWAYS, in this order: role -> id+counters -> engine+movement -> place. None of them
+# ever appears or disappears depending on runtime state — only their CONTENT changes. Ported from
+# the reference renderer `design/render.py` / `design/REFERENCE.md` (do not edit those — they are
+# the spec + contract test). Top->bottom:
+#   ╭──────────────────────────────────────────────────────────╮   top border: plain rail, no id/glyph
+#   │ <glyph> <role text, wrapped, hang-indented>               │   role
+#   ├──────────────────────────────────────────────────────────┤   separator (single — never borders engine)
+#   │ <glyph> <id>  ◷ CTX N%  ◴ 5h N%  ↺ eta  ◴ 7d N%  ↺ eta    │   id + counters
+#   ├──────────────────────────────────────────────────────────┤   double rail if engine is active
+#   │ ◆ model  ↯ effort  [⇄ PR #N]  [⠹ agents ×N] [⚙ wf ×N] [⇅ coord] │  engine + movement, one segment
+#   ├──────────────────────────────────────────────────────────┤   double rail if engine is active
 #   │ ⌂ dir  ↱ branch  ↳ path  (one row per working dir)        │   place
 #   ╰──────────────────────────────────────────────────────────╯
-# Rails: single ─ = inactive, double ═ = active (2nd signal channel besides colour). "Active" =
-# `.working` marker OR live agents/wf (coord mail shows the segment but never lights it up).
+# Rails: single ─ = inactive, double ═ = active (2nd signal channel besides colour). Only the two
+# rails bordering the engine segment can ever go double; the role|id rail and the outer top/bottom
+# borders are always single. "Active" = `.working` marker OR live agents/wf (coord mail shows the
+# segment but never lights it up).
 # Corners: TL/BR use the TempusGlyphs PUA glyphs (font: ~/Library/Fonts/TempusGlyphs-Regular.ttf,
 # U+E87E / U+E881); TR/BL are always the plain ┐ / └. Branch glyph is ↱ (U+21B1), NOT ⎇ — the
 # latter is missing from the font stack in use and renders broken.
@@ -25,6 +26,12 @@
 # role line replaces that orienting function. The background writer (topic-update.sh) still writes
 # its cache file; this script just no longer reads or displays it. Fully recoverable from git
 # history (see `git log -- statusline.sh`) if that turns out to be wrong.
+#
+# RE-LAYOUT (later fix): an intermediate revision had moved the session id into the top border and
+# split model/effort from the movement indicators into a segment that only showed up while
+# something was running. That was reverted to the corrected layout documented above and in
+# design/REFERENCE.md — four segments, always, id back inside its own segment with the counters,
+# engine+movement back on one line.
 #
 # COST DISCIPLINE (rework 2026-06-07, reaffirmed 2026-09-18 during the box-layout port): this
 # script runs on a GLOBAL config, so every fork is multiplied by the count of live sessions
@@ -311,7 +318,7 @@ render_text() {
 
     my $E="\033"; my $RESET="${E}[0m"; my $BOLD="${E}[1m";
     my $WHITE ="${E}[38;2;245;246;250m";   # role text
-    my $GREY  ="${E}[38;2;158;162;172m";   # vitals / activity counters
+    my $GREY  ="${E}[38;2;158;162;172m";   # id / engine text
     my $PATHC ="${E}[38;2;124;138;162m";   # place path
     my $ACTIVE="${E}[38;2;217;119;87m";    # active border/rail — terracotta
     my $INACTIVE="${E}[38;2;58;69;92m";    # inactive border/rail — muted
@@ -326,18 +333,14 @@ render_text() {
     sub rail_char { my ($a)=@_; return $a ? "═" : "─"; }
     sub colorize  { my ($t,$rgb,$bold)=@_; return (($bold?$BOLD:"").$rgb.$t.$RESET); }
 
-    sub top_border {
-      my ($width,$active,$glyph,$sid)=@_;
-      my $r = rail_char($active);
-      my $n = $width - (7 + length($sid)); $n = 0 if $n < 0;
-      my $rgb = $active ? $ACTIVE : $INACTIVE;
-      my $rail_run = $r." ".$glyph." ".$sid." ".($r x $n);
-      return $TL.colorize($rail_run,$rgb,0).$TR;
-    }
-    sub bottom_border {
-      my ($width,$active)=@_;
-      my $r=rail_char($active); my $rgb=$active?$ACTIVE:$INACTIVE;
-      return $BL.colorize($r x ($width-2),$rgb,0).$BR;
+    # Top/bottom border — a PLAIN rail, corner to corner. No id, no glyph:
+    # those live inside the role/id content segments now, not in the frame.
+    # Always single/inactive — the outer borders never border the engine
+    # segment, so they never take part in the highlight.
+    sub plain_border {
+      my ($width,$left,$right)=@_;
+      my $rgb=$INACTIVE;
+      return $left.colorize("─" x ($width-2),$rgb,0).$right;
     }
     sub separator {
       my ($width,$active)=@_;
@@ -369,27 +372,46 @@ render_text() {
       return "…".substr($last, -($budget-1));
     }
 
-    # Greedy word-wrap mirroring python textwrap(width=budget, subsequent_indent="  ",
-    # break_long_words=False, break_on_hyphens=False): never split a word or a hyphen, only wrap
-    # at whitespace; continuation lines carry a literal 2-space indent baked into the string (so
-    # content_row own 1-space pad reproduces the reference 3-space hanging indent).
+    # Word-wrap the role text, glyph baked into the first line ("<glyph>
+    # <text>"), a same-width 2-space indent baked into continuation lines
+    # ("  <text>") — both are 2 cells wide, so one wrap budget serves both:
+    # budget = (width-3) - 2, where (width-3) is the max content length
+    # content_row() can hold.
     sub wrap_role {
-      my ($text,$width)=@_;
-      my $budget = ($width-3)-1; $budget=1 if $budget<1;
-      my $cont_budget = $budget-2; $cont_budget=1 if $cont_budget<1;
+      my ($text,$width,$glyph)=@_;
+      my $budget = ($width-3)-2; $budget=1 if $budget<1;
       my @words = split /\s+/, $text;
       my @lines; my $cur="";
       for my $w (@words) {
         next if $w eq "";
-        my $bud = @lines ? $cont_budget : $budget;
         my $cand = $cur eq "" ? $w : "$cur $w";
-        if (length($cand) <= $bud) { $cur = $cand; }
+        if (length($cand) <= $budget) { $cur = $cand; }
         else { push(@lines,$cur) if $cur ne ""; $cur = $w; }
       }
       push(@lines,$cur) if $cur ne "" || !@lines;
       my @out;
-      for my $i (0..$#lines) { push @out, ($i==0 ? $lines[$i] : "  ".$lines[$i]); }
+      for my $i (0..$#lines) {
+        push @out, ($i==0 ? "$glyph $lines[$i]" : "  $lines[$i]");
+      }
       return @out;
+    }
+
+    # Greedily pack the engine segment tokens (model/effort/PR/movement
+    # chips) into as few lines as fit `width`, never splitting a token —
+    # so at a narrow width the segment wraps onto a second line instead of
+    # being cut off mid-token by content_row own hard ellipsis truncation.
+    sub wrap_tokens {
+      my ($parts,$width)=@_;
+      my $budget = $width-3; $budget=1 if $budget<1;
+      my @lines; my $cur="";
+      for my $p (@$parts) {
+        next if $p eq "";
+        my $cand = $cur eq "" ? $p : "$cur  $p";
+        if (length($cand) <= $budget) { $cur = $cand; }
+        else { push(@lines,$cur) if $cur ne ""; $cur = $p; }
+      }
+      push(@lines,$cur) if $cur ne "" || !@lines;
+      return @lines;
     }
 
     sub build_place_lines {
@@ -420,75 +442,66 @@ render_text() {
       push @entries, [$f[0]//"", $f[1]//"", $f[2]//""];
     }
 
-    my @v1;
-    push @v1, "◷ CTX ${ctx}%" if $ctx ne "";
-    push @v1, "◴ 5h ${rl5}%" if $rl5 ne "";
-    push @v1, "↺ ${eta5}" if $eta5 ne "";
-    push @v1, "◴ 7d ${rl7}%" if $rl7 ne "";
-    push @v1, "↺ ${day7}" if $day7 ne "";
-    my $vitals1 = join("  ", @v1);
+    # --- segment 1: role ---
+    my @role_lines = wrap_role($role, $W, $glyph);
 
-    my @v2;
-    push @v2, "◆ ${modeldisp}" if $modeldisp ne "";
-    push @v2, "↯ ${effort}" if $effort ne "";
-    push @v2, $prchip if $prchip ne "";
-    my $vitals2 = join("  ", @v2);
-
-    my @act;
-    push @act, $agentstok if $agentstok ne "";
-    push @act, $wftok if $wftok ne "";
-    push @act, $coordtok if $coordtok ne "";
-    my $activity = join("  ", @act);
-    my $activity_present = ($activity ne "");
-
-    my @role_lines = wrap_role($role, $W);
-    my @rows;
-
-    if ($narrow) {
-      # "Вузька ширина <60: злиття identity+vitals, з лічильників лише CTX."
-      my @merged = @role_lines;
-      push @merged, "◷ CTX ${ctx}%" if $ctx ne "";
-      push @merged, $activity if $activity_present;
-      my $merged_active = $busy;
-      my @place_lines = build_place_lines(\@entries, $W, 1);
-
-      push @rows, top_border($W, $merged_active, $glyph, $sid);
-      for my $ln (@merged) {
-        if (grep { $_ eq $ln } @role_lines) { push @rows, content_row($W, $ln, $WHITE, 1); }
-        else { push @rows, content_row($W, $ln, $GREY, 0); }
-      }
-      push @rows, separator($W, $merged_active);
-      for my $ln (@place_lines) {
-        my $rgb = ($ln =~ /^[⌂…\/]/) ? $PATHC : $GREY;
-        push @rows, content_row($W, $ln, $rgb, 0);
-      }
-      push @rows, bottom_border($W, 0);
-    } else {
-      my @blocks;   # [ \@lines, $active, $kind ]
-      push @blocks, [\@role_lines, $busy, "role"];
-      my @vlines = grep { $_ ne "" } ($vitals1, $vitals2);
-      push @blocks, [\@vlines, 0, "vitals"];
-      if ($activity_present) { push @blocks, [[$activity], $busy, "activity"]; }
-      my @place_lines = build_place_lines(\@entries, $W, 0);
-      push @blocks, [\@place_lines, 0, "place"];
-
-      push @rows, top_border($W, $blocks[0][1], $glyph, $sid);
-      for my $bi (0..$#blocks) {
-        my ($lines,$active,$kind) = @{$blocks[$bi]};
-        for my $ln (@$lines) {
-          if    ($kind eq "role")  { push @rows, content_row($W, $ln, $WHITE, 1); }
-          elsif ($kind eq "place") {
-            my $rgb = ($ln =~ /^[⌂…\/]/) ? $PATHC : $GREY;
-            push @rows, content_row($W, $ln, $rgb, 0);
-          } else { push @rows, content_row($W, $ln, $GREY, 0); }
-        }
-        if ($bi < $#blocks) {
-          my $next_active = $blocks[$bi+1][1];
-          push @rows, separator($W, $active || $next_active);
-        }
-      }
-      push @rows, bottom_border($W, $blocks[-1][1]);
+    # --- segment 2: id + counters (narrow: CTX only) ---
+    my @idparts;
+    push @idparts, "◷ CTX ${ctx}%" if $ctx ne "";
+    unless ($narrow) {
+      push @idparts, "◴ 5h ${rl5}%" if $rl5 ne "";
+      push @idparts, "↺ ${eta5}" if $eta5 ne "";
+      push @idparts, "◴ 7d ${rl7}%" if $rl7 ne "";
+      push @idparts, "↺ ${day7}" if $day7 ne "";
     }
+    my $id_line = "$glyph $sid".(@idparts ? "  ".join("  ",@idparts) : "");
+
+    # --- segment 3: engine (model + effort [+ PR]) + movement, ALWAYS one
+    # segment, ALWAYS present — movement tokens are appended to the SAME
+    # line (or wrapped onto a continuation line of the SAME segment) when
+    # there is something to show, never a segment of their own. ---
+    my @eparts;
+    push @eparts, "◆ ${modeldisp}" if $modeldisp ne "";
+    push @eparts, "↯ ${effort}" if $effort ne "";
+    push @eparts, $prchip if $prchip ne "";
+    push @eparts, $agentstok if $agentstok ne "";
+    push @eparts, $wftok if $wftok ne "";
+    push @eparts, $coordtok if $coordtok ne "";
+    my @engine_lines = wrap_tokens(\@eparts, $W);
+
+    # --- segment 4: place ---
+    my @place_lines = build_place_lines(\@entries, $W, $narrow);
+
+    # Four segments, always, in this order. Only segment 3 (engine+movement)
+    # can be "active"; segments 1/2/4 never carry their own active flag. A
+    # separator lights up (double rail) if either side it sits between is
+    # active — so only the id|engine and engine|place separators can ever go
+    # double; the role|id separator and the outer top/bottom borders stay a
+    # plain single rail.
+    my @blocks = (
+      [\@role_lines,   0,     "role"],
+      [[$id_line],     0,     "id"],
+      [\@engine_lines, $busy, "engine"],
+      [\@place_lines,  0,     "place"],
+    );
+
+    my @rows;
+    push @rows, plain_border($W, $TL, $TR);
+    for my $bi (0..$#blocks) {
+      my ($lines,$active,$kind) = @{$blocks[$bi]};
+      for my $ln (@$lines) {
+        if    ($kind eq "role")  { push @rows, content_row($W, $ln, $WHITE, 1); }
+        elsif ($kind eq "place") {
+          my $rgb = ($ln =~ /^[⌂…]/) ? $PATHC : $GREY;
+          push @rows, content_row($W, $ln, $rgb, 0);
+        } else { push @rows, content_row($W, $ln, $GREY, 0); }
+      }
+      if ($bi < $#blocks) {
+        my $next_active = $blocks[$bi+1][1];
+        push @rows, separator($W, $active || $next_active);
+      }
+    }
+    push @rows, plain_border($W, $BL, $BR);
 
     print join("\n", @rows);
   ' -- "$@"
