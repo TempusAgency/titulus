@@ -149,6 +149,34 @@ name_file="$cache_dir/$session_id.name"       # auto chat name (provisional or f
 heur_file="$cache_dir/$session_id.heur"       # 1 line fallback: first user message
 name_user="$user_dir/$session_id.topic"       # user-stated NAME (wins, permanent)
 
+# placeholder role values are NOT real roles — they are stamps the launcher/coord pipeline writes
+# before a human (or the AI auto-role) names the session: `unknown` = a fresh-plain launch
+# descriptor's default, `legacy-adopted`/`legacy-adopt-*` = an adopted pre-existing session,
+# `unassigned` = a coord inbox pre-created before the orchestrator assigns a role. If one of these
+# reaches the card it freezes on the placeholder text ("unknown") instead of falling through to
+# the next source in the precedence chain below (spec: work/specs/ROLE-SOURCE-OF-TRUTH-20260920.md
+# §3). A bash function, not a subprocess — this check runs in the ×40-session render path.
+is_placeholder_role() {
+  case "$1" in
+    ""|unknown|Unknown|UNKNOWN|unassigned|Unassigned|UNASSIGNED| \
+    legacy-adopted|Legacy-Adopted|LEGACY-ADOPTED|legacy-adopt-*|Legacy-Adopt-*|LEGACY-ADOPT-*| \
+    none|None|NONE|tbd|TBD|null|Null|NULL|"-"|"?"|"—") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# TEMPUS_ROLE (SPEC §3 step 2): the launcher's own descriptor role, already exported as an env var
+# for this process — free to read, zero forks. Used only when it is not a placeholder stamp (see
+# is_placeholder_role above); a placeholder falls through to the coord role / auto-role below,
+# exactly like a placeholder coord_role does.
+tempus_role="${TEMPUS_ROLE:-}"
+if is_placeholder_role "$tempus_role"; then
+  tempus_role=""
+elif [ -n "$tempus_role" ]; then
+  case "$tempus_role" in [a-z]*)   # capitalise first letter of an ASCII slug (coordinator → Coordinator)
+    _r="${tempus_role#?}"; tempus_role="$(printf '%s' "${tempus_role%"$_r"}" | tr 'a-z' 'A-Z')$_r";; esac
+fi
+
 # coord ROLE + coord PRESENCE (SPEC-card-line1-role / activity ⇅ coord): ONLY if a coord inbox
 # file for this session exists in cwd. ZERO forks when the file is absent (the common case); one
 # grep when present. coord_present drives the activity chip; coord_role feeds the name/role
@@ -163,23 +191,27 @@ if [ -n "$cwd" ] && [ -f "$cwd/_coord/inbox/$session_id.md" ]; then
   coord_role="${coord_role%"${coord_role##*[![:space:]]}"}"   # rtrim
   coord_role="${coord_role#[\"\']}"; coord_role="${coord_role%[\"\']}"   # strip surrounding quotes
   # placeholder roles are NOT a real role: the coord channel pre-creates inboxes with
-  # `role: unassigned` before the orchestrator assigns one. Treat these as empty → fall through to
-  # session_name / AI auto-role, so the session still gets a real role (not a frozen "Unassigned").
-  case "$coord_role" in
-    unassigned|Unassigned|UNASSIGNED|none|None|NONE|tbd|TBD|null|"-"|"?"|"—") coord_role="" ;;
-  esac
-  if [ -n "$coord_role" ]; then
+  # `role: unassigned` (and launcher descriptors stamp `unknown` / `legacy-adopted`) before a real
+  # role is set. Treat these as empty → fall through to session_name / AI auto-role, so the session
+  # still gets a real role (not a frozen placeholder).
+  if is_placeholder_role "$coord_role"; then
+    coord_role=""
+  elif [ -n "$coord_role" ]; then
     case "$coord_role" in [a-z]*)   # capitalise first letter of an ASCII slug (orchestrator → Orchestrator)
       _r="${coord_role#?}"; coord_role="$(printf '%s' "${coord_role%"$_r"}" | tr 'a-z' 'A-Z')$_r";; esac
   fi
 fi
 
-# ROLE ("Слово. допис") = the card's identity segment text. Precedence: user-set role → coord role
-# → CC session_name → background auto-role → first-message heuristic. HARD RULE: the AI auto-role
-# and the heuristic NEVER override a KNOWN role (user-set or coord) — that kills the "card
-# describes its own restart / shows (нова сесія)" bug.
+# ROLE ("Слово. допис") = the card's identity segment text. Precedence per
+# work/specs/ROLE-SOURCE-OF-TRUTH-20260920.md §3: user-set topic (wct-goal.sh) → $TEMPUS_ROLE →
+# coord role → CC session_name → background auto-role → first-message heuristic. Placeholder
+# stamps (unknown/unassigned/legacy-adopted/…) were already filtered out of tempus_role and
+# coord_role above, so only a REAL role short-circuits the auto-role/heuristic below. HARD RULE:
+# the AI auto-role and the heuristic NEVER override a KNOWN role (user-set, TEMPUS_ROLE, or coord)
+# — that kills the "card describes its own restart / shows (нова сесія)" bug.
 name=""
 if   [ -s "$name_user" ]; then name="$(<"$name_user")"
+elif [ -n "$tempus_role" ]; then name="$tempus_role"
 elif [ -n "$coord_role" ]; then name="$coord_role"
 elif [ -n "${session_name:-}" ]; then name="$session_name"
 elif [ -s "$name_file" ]; then name="$(<"$name_file")"
