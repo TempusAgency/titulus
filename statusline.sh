@@ -177,15 +177,45 @@ elif [ -n "$tempus_role" ]; then
     _r="${tempus_role#?}"; tempus_role="$(printf '%s' "${tempus_role%"$_r"}" | tr 'a-z' 'A-Z')$_r";; esac
 fi
 
-# coord ROLE + coord PRESENCE (SPEC-card-line1-role / activity ⇅ coord): ONLY if a coord inbox
-# file for this session exists in cwd. ZERO forks when the file is absent (the common case); one
-# grep when present. coord_present drives the activity chip; coord_role feeds the name/role
-# precedence chain below — SAME disk read, no extra access for the new indicator.
+# coord ROLE + coord PRESENCE (SPEC-card-line1-role / activity ⇅ coord): the coord inbox file for
+# this session usually lives at $cwd/_coord/inbox/<id>.md, but a session that has cd'd into a
+# subfolder (e.g. working on a draft in changes/.../candidate/v02) has a cwd BELOW the project
+# root where _coord actually lives — the old exact-cwd check missed it there and the role fell
+# through to a stale frozen auto-name (2026-09-22 bug, session e601bc7b: cwd 4 levels under
+# `Spravno ADS`, coord role — a real, non-placeholder one — invisible to the card). FIX: walk
+# UPWARDS from $cwd toward the filesystem root looking for _coord/inbox/<id>.md, the same way
+# a `.git` search would, capped at 10 levels and stopping at $HOME or `/` so a session with no
+# coord dir anywhere above it (e.g. cwd under /tmp) gives up quickly instead of walking the whole
+# disk. Pure bash: ${var%/*} parameter-expansion trimming + `[ -f ]` stat tests, NO subprocess
+# (no find/dirname/realpath) — this runs on every render in ~40 concurrent sessions, so the walk
+# itself must stay fork-free; only the ~10 extra `[ -f ]` stat syscalls are added over the old
+# single check. coord_present drives the activity chip; coord_role feeds the name/role precedence
+# chain below — SAME disk read, no extra access for the new indicator.
 coord_present=0
 coord_role=""
-if [ -n "$cwd" ] && [ -f "$cwd/_coord/inbox/$session_id.md" ]; then
+coord_dir=""
+if [ -n "$cwd" ]; then
+  _search="$cwd"
+  _depth=0
+  while :; do
+    if [ -f "$_search/_coord/inbox/$session_id.md" ]; then
+      coord_dir="$_search"
+      break
+    fi
+    [ "$_search" = "$HOME" ] && break
+    [ "$_search" = "/" ] && break
+    _depth=$((_depth + 1))
+    [ "$_depth" -ge 10 ] && break
+    _parent="${_search%/*}"
+    [ -z "$_parent" ] && _parent="/"
+    [ "$_parent" = "$_search" ] && break
+    _search="$_parent"
+  done
+  unset -v _search _depth _parent
+fi
+if [ -n "$coord_dir" ]; then
   coord_present=1
-  coord_role="$(grep -m1 '^role:' "$cwd/_coord/inbox/$session_id.md" 2>/dev/null)"
+  coord_role="$(grep -m1 '^role:' "$coord_dir/_coord/inbox/$session_id.md" 2>/dev/null)"
   coord_role="${coord_role#role:}"
   coord_role="${coord_role#"${coord_role%%[![:space:]]*}"}"   # ltrim
   coord_role="${coord_role%"${coord_role##*[![:space:]]}"}"   # rtrim
